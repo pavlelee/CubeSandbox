@@ -111,17 +111,16 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 	return s.client.doJSON(ctx, http.MethodDelete, path, nil, nil, http.StatusOK, http.StatusNoContent)
 }
 
+// Close releases idle HTTP connections used by this sandbox's client. It does
+// not pause or kill the remote sandbox.
+//
+// Deprecated: use Client.Close for SDK client cleanup. Use Sandbox.Kill or
+// Sandbox.Pause for remote sandbox lifecycle.
 func (s *Sandbox) Close() error {
-	if s.client == nil {
+	if s == nil || s.client == nil {
 		return nil
 	}
-	if s.client.dataHTTP != nil {
-		s.client.dataHTTP.CloseIdleConnections()
-	}
-	if s.client.controlHTTP != nil {
-		s.client.controlHTTP.CloseIdleConnections()
-	}
-	return nil
+	return s.client.Close()
 }
 
 func (s *Sandbox) RunCode(ctx context.Context, code string, opts RunCodeOptions) (*Execution, error) {

@@ -39,6 +39,40 @@ func TestWithHTTPClientOption(t *testing.T) {
 	}
 }
 
+func TestClientClose(t *testing.T) {
+	var nilClient *Client
+	if err := nilClient.Close(); err != nil {
+		t.Fatalf("nil Client.Close returned error: %v", err)
+	}
+
+	controlTransport := &closeCountingTransport{}
+	dataTransport := &closeCountingTransport{}
+	client := &Client{
+		controlHTTP: &http.Client{Transport: controlTransport},
+		dataHTTP:    &http.Client{Transport: dataTransport},
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("Client.Close returned error: %v", err)
+	}
+	if controlTransport.closes != 1 || dataTransport.closes != 1 {
+		t.Fatalf("close count mismatch: control=%d data=%d", controlTransport.closes, dataTransport.closes)
+	}
+
+	sharedTransport := &closeCountingTransport{}
+	sharedHTTP := &http.Client{Transport: sharedTransport}
+	client = NewClient(Config{}, WithHTTPClient(sharedHTTP))
+	if err := client.Close(); err != nil {
+		t.Fatalf("Client.Close with shared HTTP client returned error: %v", err)
+	}
+	if sharedTransport.closes != 1 {
+		t.Fatalf("shared HTTP client closed %d times, want 1", sharedTransport.closes)
+	}
+
+	if err := NewClient(Config{}).Close(); err != nil {
+		t.Fatalf("default Client.Close returned error: %v", err)
+	}
+}
+
 func TestClientRequestErrorPaths(t *testing.T) {
 	client := NewClient(Config{APIURL: "http://127.0.0.1:1"})
 
@@ -278,13 +312,21 @@ func TestKillErrorPath(t *testing.T) {
 	}
 }
 
-func TestCloseBranchesAndAccessors(t *testing.T) {
-	if err := (&Sandbox{}).Close(); err != nil {
-		t.Fatalf("Close without client returned error: %v", err)
+func TestSandboxAccessors(t *testing.T) {
+	if err := (*Sandbox)(nil).Close(); err != nil {
+		t.Fatalf("nil Sandbox.Close returned error: %v", err)
 	}
-	sb := &Sandbox{client: NewClient(Config{})}
+	if err := (&Sandbox{}).Close(); err != nil {
+		t.Fatalf("detached Sandbox.Close returned error: %v", err)
+	}
+
+	transport := &closeCountingTransport{}
+	sb := &Sandbox{client: &Client{controlHTTP: &http.Client{Transport: transport}}}
 	if err := sb.Close(); err != nil {
-		t.Fatalf("Close returned error: %v", err)
+		t.Fatalf("Sandbox.Close returned error: %v", err)
+	}
+	if transport.closes != 1 {
+		t.Fatalf("Sandbox.Close closed idle connections %d times, want 1", transport.closes)
 	}
 	if sb.Commands() == nil {
 		t.Fatal("Commands returned nil")
@@ -560,6 +602,22 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+type closeCountingTransport struct {
+	closes int
+}
+
+func (t *closeCountingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    req,
+	}, nil
+}
+
+func (t *closeCountingTransport) CloseIdleConnections() {
+	t.closes++
 }
 
 type errReaderCloser struct{}

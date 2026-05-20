@@ -39,6 +39,7 @@ import (
 func main() {
 	ctx := context.Background()
 	client := cubesandbox.NewClient(cubesandbox.NewConfigFromEnv())
+	defer client.Close()
 
 	sb, err := client.Create(ctx, cubesandbox.CreateOptions{})
 	if err != nil {
@@ -53,6 +54,10 @@ func main() {
 	fmt.Println(exec.Text)
 }
 ```
+
+`Client.Close` releases local idle HTTP connections held by the SDK client. It does not pause or destroy remote sandboxes.
+Use `Sandbox.Kill` to destroy a sandbox, or `Sandbox.Pause` when you want to keep the sandbox for a later `Client.Connect`.
+When `WithHTTPClient` is used with a shared `*http.Client`, `Client.Close` also closes that shared client's idle connections.
 
 ## Commands
 

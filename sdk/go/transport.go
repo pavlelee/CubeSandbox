@@ -12,7 +12,8 @@ import (
 )
 
 func newControlHTTPClient(cfg Config) *http.Client {
-	return &http.Client{Timeout: cfg.RequestTimeout}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	return &http.Client{Timeout: cfg.RequestTimeout, Transport: transport}
 }
 
 func newDataHTTPClient(cfg Config) *http.Client {

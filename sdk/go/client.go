@@ -16,7 +16,9 @@ import (
 type ClientOption func(*Client)
 
 // WithHTTPClient injects an HTTP client for SDK requests. It is primarily
-// useful in tests or when the caller owns transport configuration.
+// useful in tests or when the caller owns transport configuration. If the
+// injected client is shared elsewhere, Client.Close also closes that client's
+// idle connections.
 func WithHTTPClient(httpClient *http.Client) ClientOption {
 	return func(c *Client) {
 		if httpClient == nil {
@@ -44,6 +46,21 @@ func NewClient(config Config, opts ...ClientOption) *Client {
 		opt(client)
 	}
 	return client
+}
+
+// Close releases idle HTTP connections used by this client. It does not pause
+// or kill any remote sandboxes.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	if c.controlHTTP != nil {
+		c.controlHTTP.CloseIdleConnections()
+	}
+	if c.dataHTTP != nil && c.dataHTTP != c.controlHTTP {
+		c.dataHTTP.CloseIdleConnections()
+	}
+	return nil
 }
 
 func (c *Client) Create(ctx context.Context, opts CreateOptions) (*Sandbox, error) {
