@@ -51,6 +51,10 @@ entrypoint behavior.
   image responsibilities remain clean.
 - `cube-proxy-node` is built from `CubeProxy/Dockerfile`; no duplicate Dockerfile is kept here.
 - `cube-egress` is built from `CubeEgress/Dockerfile`; no duplicate Dockerfile is kept here. Its `cube-egress/openresty:1.29.2.5-tproxy` base image is built first from `CubeEgress/openresty/Dockerfile`, because that patched OpenResty base is part of the upstream CubeEgress build chain rather than a public pull-only dependency.
+  The build script also tags that local base as
+  `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy`, matching
+  the upstream `CubeEgress/Dockerfile` `FROM` line, so the final egress image
+  uses the just-built base instead of pulling a drifting external image.
 - `cube-egress-net` is a Kubernetes helper image that owns the host TPROXY
   iptables/ip-rule setup for CubeEgress. It packages the upstream
   `CubeEgress/scripts/cube-proxy-iptables-init.sh` plus a small idempotent

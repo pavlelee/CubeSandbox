@@ -58,7 +58,10 @@ spec:
           echo '[health-test] check node registration'
           nodes_json="$(curl --connect-timeout 5 --max-time 15 -fsS "${api_base%/}/cubeapi/v1/nodes")"
           printf '%s\n' "${nodes_json}"
-          printf '%s\n' "${nodes_json}" | grep -Eq '"nodeID"|"hostIP"|"healthy"[[:space:]]*:[[:space:]]*true|"data"'
+          healthy_nodes="$(printf '%s\n' "${nodes_json}" | grep -o '"healthy"[[:space:]]*:[[:space:]]*true' | wc -l | tr -d ' ')"
+          node_ids="$(printf '%s\n' "${nodes_json}" | grep -o '"nodeID"[[:space:]]*:' | wc -l | tr -d ' ')"
+          test "${healthy_nodes}" -ge 1
+          test "${node_ids}" -ge 1
           {{- else }}
           echo '[health-test] skip node registration: cubeNode.enabled=false'
           {{- end }}
@@ -238,8 +241,7 @@ spec:
         - -ec
         - |
           echo '[health-test] check control-node CubeProxy'
-          curl --connect-timeout 5 --max-time 15 -sS -o /dev/null http://${NODE_IP}:{{ .Values.cubeProxy.ports.http.containerPort }}/
-          curl --connect-timeout 5 --max-time 15 -ksS -o /dev/null https://${NODE_IP}:{{ .Values.cubeProxy.ports.https.containerPort }}/
+          curl --connect-timeout 5 --max-time 15 -fsS -o /dev/null http://127.0.0.1:{{ .Values.cubeProxy.probes.readiness.port }}{{ .Values.cubeProxy.probes.readiness.path }}
 {{- end }}
 {{ if .Values.cubeDns.enabled }}
 ---

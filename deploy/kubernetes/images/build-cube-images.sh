@@ -17,6 +17,7 @@ PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
 BUILD_ROOT="${BUILD_ROOT:-/tmp/cube-kubernetes-images-${VERSION}}"
 CUBE_NODE_BASE_IMAGE="${CUBE_NODE_BASE_IMAGE:-}"
+CUBE_EGRESS_OPENRESTY_BASE_IMAGE="${CUBE_EGRESS_OPENRESTY_BASE_IMAGE:-cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/openresty-tproxy}"
 
 ONE_CLICK_URL="${ONE_CLICK_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/cube-sandbox-one-click-${VERSION}.tar.gz}"
 PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
@@ -276,11 +277,13 @@ build_cube_egress_openresty_base_image() {
   local docker_args=(
     -f "${REPO_ROOT}/CubeEgress/openresty/Dockerfile"
     -t "${image}"
+    -t "${CUBE_EGRESS_OPENRESTY_BASE_IMAGE}"
   )
   if [[ "${NO_CACHE}" == "1" ]]; then
     docker_args=(--no-cache --pull "${docker_args[@]}")
   fi
   log "building ${image} from ${REPO_ROOT}/CubeEgress/openresty/Dockerfile"
+  log "tagging ${image} as ${CUBE_EGRESS_OPENRESTY_BASE_IMAGE} for CubeEgress/Dockerfile"
   docker build "${docker_args[@]}" "${REPO_ROOT}/CubeEgress/openresty"
 }
 
@@ -294,7 +297,10 @@ build_cube_egress_image() {
     --build-arg "CUBE_EGRESS_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   )
   if [[ "${NO_CACHE}" == "1" ]]; then
-    docker_args=(--no-cache --pull "${docker_args[@]}")
+    # Do not add --pull here: CubeEgress/Dockerfile uses a fixed FROM name.
+    # build_cube_egress_openresty_base_image tags the locally built base with
+    # that exact name so the egress image remains reproducible.
+    docker_args=(--no-cache "${docker_args[@]}")
   fi
   log "building ${image} from ${REPO_ROOT}/CubeEgress/Dockerfile"
   docker build "${docker_args[@]}" "${REPO_ROOT}/CubeEgress"
