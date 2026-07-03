@@ -1,6 +1,6 @@
 # CubeSandbox Chart 组件关系与运行流程
 
-本文说明 `deploy/k8s/chart` 的整体架构、组件关系、安装流程和运行期关键链路，帮助交付、运维和后续开发快速理解 Chart 如何还原 One Click 包能力。
+本文说明 `deploy/kubernetes/chart` 的整体架构、组件关系、安装流程和运行期关键链路，帮助交付、运维和后续开发快速理解 Chart 如何还原 One Click 包能力。
 
 ## 1. 总体分层
 
@@ -12,9 +12,9 @@ CubeSandbox Chart 按职责分为 7 层：
 | 控制面 API | CubeAPI | Deployment + Service | 对外 HTTP API，读写 MySQL，访问 CubeMaster |
 | 管理入口 | WebUI | Deployment + Service + ConfigMap | 静态控制台，反向代理 `/cubeapi/` 到 CubeAPI |
 | 运维入口 | cubemastercli | Deployment | 面向 `kubectl exec` 的 CLI Pod，交付真实 `cubemastercli` 并注入本 Release 的 CubeMaster endpoint |
-| 依赖存储 | MySQL / Redis | 内置 Deployment + Service + PVC/hostPath，或第三方服务 | MySQL 存储业务数据；Redis 存储 CubeProxy/Sidecar 状态 |
+| 依赖存储 | MySQL / Redis | 内置 StatefulSet + Headless Service + volumeClaimTemplates/hostPath，或第三方服务 | MySQL 存储业务数据；Redis 存储 CubeProxy/Sidecar 状态 |
 | 计算面 | Cube Node Big Pod | DaemonSet | 节点初始化、运行 cubelet/network-agent、透明 egress sidecar |
-| 数据面入口 | CubeProxy / CubeDNS | CubeProxy DaemonSet；CubeDNS DaemonSet 或 Deployment | HTTP/HTTPS sandbox 入口；sandbox 域名解析 |
+| 数据面入口 | CubeProxy / CubeDNS | CubeProxy Deployment；CubeDNS DaemonSet 或 Deployment | HTTP/HTTPS sandbox 入口；sandbox 域名解析 |
 
 默认完整部署形态：
 
@@ -27,6 +27,7 @@ flowchart TB
     CLI["cubemastercli Deployment\nreal cubemastercli binary"]
     MYSQL[("cube-mysql\nMySQL 8.0 + PVC")]
     REDIS[("cube-redis\nRedis 7-alpine + PVC")]
+    PROXY["cube-proxy-node Deployment\nHTTP/HTTPS 80/443"]
     CMS["cube-master-config Secret\nconf.yaml"]
     CA["cube-egress-ca Secret"]
     CERT["cube-proxy-certs Secret"]
@@ -34,7 +35,6 @@ flowchart TB
 
   subgraph COMPUTE["Compute Nodes selected by placement.compute"]
     DNS["cube-dns DaemonSet\nCoreDNS 127.0.0.54:53"]
-    PROXY["cube-proxy-node DaemonSet\nHTTP/HTTPS 80/443"]
     subgraph NODE["cube-node DaemonSet Big Pod"]
       WAITDNS["init: wait-cube-dns"]
       PVM["init: pvm-host-bootstrap\noptional"]
@@ -73,7 +73,7 @@ flowchart TB
 | 资源 | 模板 | 镜像 / 数据 | 说明 |
 | --- | --- | --- | --- |
 | `cube-master` | `templates/master.yaml` | `images.master` | 复用 `CubeMaster/docker/Dockerfile`；启动时挂载 Chart 渲染的 `conf.yaml`；数据库迁移由 CubeMaster 内置逻辑完成 |
-| `cube-master-config` | `templates/master-config-secret.yaml` | `deploy/k8s/chart/files/cube-master/conf.yaml` 渲染结果 | 注入 MySQL / Redis / CA 等运行配置 |
+| `cube-master-config` | `templates/master-config-secret.yaml` | `deploy/kubernetes/chart/files/cube-master/conf.yaml` 渲染结果 | 注入 MySQL / Redis / CA 等运行配置 |
 | `cube-master-storage` | `templates/master.yaml` / `templates/master-pvc.yaml` | PVC / existingClaim / hostPath / emptyDir | 对应 One Click `/data/CubeMaster/storage` artifact 目录；默认使用 PVC，避免多 control 节点场景下 hostPath 数据绑定单节点 |
 | `cube-api` | `templates/api.yaml` | `images.api` | 暴露 HTTP API，连接 CubeMaster 和 MySQL |
 | `cubemastercli` | `templates/cubemastercli.yaml` | `images.cubemastercli` | 运维 CLI Pod；只内置真实 `CubeMaster/bin/cubemastercli`，Chart 注入本 Release 的 CubeMaster endpoint |
@@ -84,9 +84,9 @@ flowchart TB
 
 | 模式 | 行为 |
 | --- | --- |
-| 内置 MySQL | `mysql.host=""` 时安装 `cube-mysql` Deployment / Service / PVC，显式配置 `mysql.persistence.hostPath` 时才使用 hostPath |
+| 内置 MySQL | `mysql.host=""` 时安装 `cube-mysql` StatefulSet / Headless Service / volumeClaimTemplates，显式配置 `mysql.persistence.hostPath` 时才使用 hostPath |
 | 第三方 MySQL | `mysql.host` 非空时不安装内置 MySQL，CubeMaster / CubeAPI 使用外部地址 |
-| 内置 Redis | `redis.host=""` 且控制面或 CubeProxy 需要 Redis 时安装 `cube-redis` |
+| 内置 Redis | `redis.host=""` 且控制面或 CubeProxy 需要 Redis 时安装 `cube-redis` StatefulSet / Headless Service / volumeClaimTemplates |
 | 第三方 Redis | `redis.host` 非空时不安装内置 Redis，CubeProxy / CubeMaster 使用外部地址 |
 
 ### 2.3 计算面 Big Pod
@@ -118,17 +118,18 @@ flowchart TB
 
 | 资源 | 模板 | 职责 |
 | --- | --- | --- |
-| `cube-proxy-node` DaemonSet | `templates/proxy-node.yaml` | 提供 sandbox HTTP/HTTPS 数据面入口，使用 `placement.compute` 和 Cube Node 部署到同一组计算节点，并使用 `hostNetwork` 监听节点 `80/443` |
+| `cube-proxy-node` Deployment | `templates/proxy-node.yaml` | 提供 sandbox HTTP/HTTPS 数据面入口，使用 `placement.controlPlane` 与 one-click control 节点语义对齐，并使用 `hostNetwork` 监听节点 `80/443` |
 | `cube-proxy-certs` Secret / Certificate | `templates/proxy-node.yaml` | TLS 证书，支持 selfSigned、inline、existingSecret、certManager |
 | `cube-dns` | `templates/dns.yaml` | 提供 sandbox 域名解析；默认 node-local |
 
 CubeProxy 默认保持 One Click 的 host-network 语义：
 
 - `cubeProxy.hostNetwork=true`，Pod IP 等于所在节点 HostIP。
-- `cube-proxy-node` 和 `cube-dns` 均复用 `placement.compute`，与 `cube-node` 保持同一组计算节点。
+- `cube-proxy-node` 复用 `placement.controlPlane`，与 one-click control 节点上的 CubeProxy 对齐。
+- `cube-dns` 复用 `placement.compute`，与 `cube-node` 保持同一组计算节点。
 - nginx 监听节点 `80/443`，Chart 启动脚本会把镜像默认 `8081/8080` patch 为 values 中配置的端口。
-- node-local `cube-dns` 返回当前节点 HostIP 后，流量会进入本节点 CubeProxy。
-- CubeProxy 可以直连本机 sandbox bridge IP，例如 `192.168.0.x:<containerPort>`。
+- node-local `cube-dns` 应通过 `cubeProxy.advertiseIP` 或 `cubeDns.answerIP` 返回 control 节点 CubeProxy 入口。
+- CubeProxy 通过 Redis 中的 owner `HostIP:hostPort` 元数据转发到目标 compute 节点 sandbox。
 - nginx `global.conf` 中写入 `resolver`，Lua Redis 客户端可以解析内置或第三方 Redis DNS 名称。
 - Chart 不修改 CubeProxy Lua 后端解析语义；跨节点访问仍遵循社区 CubeProxy 使用 Redis `HostIP:hostPort` 的原始路径。
 
@@ -141,10 +142,10 @@ sequenceDiagram
   participant CN as cube-node Pod
   participant DNS as cube-dns on same node
   participant KDNS as Kubernetes DNS
-  participant PX as cube-proxy-node
+  participant PX as cube-proxy-node on control node
 
   CN->>DNS: resolve cube.app / *.cube.app via 127.0.0.54
-  DNS-->>CN: A record = current node HostIP
+  DNS-->>CN: A record = cubeProxy.advertiseIP / cubeDns.answerIP
   CN->>DNS: resolve kubernetes.default.svc.cluster.local
   DNS->>KDNS: forward cluster/service DNS query
   KDNS-->>DNS: ClusterIP answer
@@ -157,25 +158,20 @@ sequenceDiagram
 - `cube-dns` 以 DaemonSet + `hostNetwork` 运行在计算节点。
 - `cube-dns` 监听 `127.0.0.54:53`；启用 `cubeDns.sandboxGateway.enabled`
   时也监听当前 compute 节点 HostIP，供 sandbox guest 作为 nameserver。
-- `cube-proxy-node` 以 DaemonSet + `hostNetwork` 运行在计算节点，监听节点 `80/443`。
+- `cube-proxy-node` 以 Deployment + `hostNetwork` 运行在 control 节点，监听节点 `80/443`。
 - `cube-node` 使用 `dnsPolicy: None`，显式配置 `nameserver 127.0.0.54`。
-- `cube.app` / `*.cube.app` 默认解析为当前节点 HostIP；配置 `cubeDns.answerIP` 后返回固定 IP。
+- `cube.app` / `*.cube.app` 优先解析为 `cubeDns.answerIP`，其次为 `cubeProxy.advertiseIP`；两者为空时才回退到当前 compute HostIP。
 - 其他域名转发到 `cubeDns.forward.upstreams`，为空时使用 `/etc/resolv.conf`。
 - Chart 不修改宿主机全局 DNS，不影响非 Cube Pod。
 - Cube sandbox guest DNS 由 `cubeNode.dns.sandbox` 单独写入 Cubelet dynamicconf。
 - 默认写入当前 compute 节点 HostIP，让 guest 使用 node-local `cube-dns`。
-- sandbox 访问 Kubernetes Service ClusterIP 会绕过宿主机 kube-proxy DNAT；
-  对需要暴露给 sandbox 的 Service，使用 `cubeNode.sandboxServiceProxies`
-  在节点侧创建 HTTP proxy，并让 `cube-dns` 把对应域名解析到当前节点 HostIP。
-  如果本机 HostIP hairpin 超时，启用
-  `cubeNode.sandboxServiceProxy.dedicated`，把域名解析到固定的非 owner
-  proxy 节点。
+- sandbox 访问 Kubernetes Service ClusterIP 可能绕过宿主机 kube-proxy DNAT；Chart 不再渲染 sandbox service proxy 资源或对应 DNS override。需要暴露给 sandbox 的 in-cluster Service 应由平台网络层、AgentWay provider 或 operator 管理的外部代理处理。
 - 外部客户端、浏览器、SDK 或未显式使用该 `dnsConfig` 的 Pod，需要由使用方配置 DNS / 负载均衡 / Ingress，把 `cubeProxy.domain` 与 wildcard 子域名指向 CubeProxy 入口。
 
 可选 `cubeDns.mode=service`：
 
 - `cube-dns` 以 Deployment + ClusterIP Service 运行。
-- `cube.app` / wildcard 必须通过 `cubeDns.answerIP` 返回明确的 CubeProxy 入口。
+- `cube.app` / wildcard 必须通过 `cubeDns.answerIP` 或 `cubeProxy.advertiseIP` 返回明确的 CubeProxy 入口。
 - 使用方需要自行把客户端 DNS 或上游 DNS 指向该 Service。
 
 ## 4. 安装与启动流程
@@ -199,7 +195,8 @@ flowchart TD
 
 - `controlPlane.enabled=true` 时必须配置 `placement.controlPlane.nodeSelector`。
 - `cubeNode.enabled=true` 时必须配置 `placement.compute.nodeSelector`。
-- `cubeProxy.enabled=true` 或 `cubeDns.enabled=true` 时必须配置 `placement.compute.nodeSelector`。
+- `cubeProxy.enabled=true` 时必须配置 `placement.controlPlane.nodeSelector`。
+- `cubeDns.enabled=true` 时必须配置 `placement.compute.nodeSelector`。
 - compute-only 模式必须显式配置 `externalControlPlane.masterEndpoint`。
 - `cubeNode.dns.useCubeDns=true` 时要求 `cubeDns.enabled=true`、`cubeDns.mode=nodeLocal`、`security.hostNetwork=true`。
 - `cubeDns.mode` 只能为 `nodeLocal` 或 `service`。
@@ -207,8 +204,8 @@ flowchart TD
 
 ### 4.1.1 调度与时区
 
-- CubeMaster、CubeAPI、WebUI、cubemastercli、内置 MySQL、内置 Redis 使用 `placement.controlPlane`。
-- `cube-node`、`cube-proxy-node`、`cube-dns` 使用 `placement.compute`。
+- CubeMaster、CubeAPI、WebUI、cubemastercli、内置 MySQL、内置 Redis、CubeProxy 使用 `placement.controlPlane`。
+- `cube-node`、`cube-dns` 使用 `placement.compute`。
 - 所有 Chart 管理的 Cube 容器、sidecar 和 initContainer 都通过 `global.timezone` 注入 `TZ`，默认 `Asia/Shanghai`。
 
 ### 4.2 控制面启动
@@ -336,9 +333,9 @@ flowchart LR
 说明：
 
 - `cube-proxy-node` 默认启用，随 Chart 一起安装和卸载。
-- `cube-proxy-node` 默认使用 `hostNetwork`，确保能够接入节点 `80/443` 流量并访问本机 sandbox bridge。
+- `cube-proxy-node` 默认使用 `hostNetwork`，确保 control 节点能够接入 `80/443` 流量。
 - Chart 不创建 `cube-proxy-node` ClusterIP Service，避免 Kubernetes 随机分发到非目标节点后偏离 One Click 的显式 CubeProxy host 入口模型。
-- 需要多节点统一入口时，应由外部 DNS/LB 明确指向预期 CubeProxy 节点或保证社区 CubeProxy 的 `HostIP:hostPort` 跨节点路径可用，而不是依赖默认 ClusterIP 随机分流。
+- 需要多节点统一入口时，应由外部 DNS/LB 明确指向预期 control 节点 CubeProxy 或保证社区 CubeProxy 的 `HostIP:hostPort` 跨节点路径可用，而不是依赖默认 ClusterIP 随机分流。
 - TLS 支持 selfSigned、existingSecret、inline、certManager。
 - 生产环境应提供正式证书，并把 sandbox domain / wildcard DNS 指向明确的 CubeProxy 入口。
 - Chart 自带 `cube-dns` 默认只服务 `cube-node` Big Pod；面向用户访问的外部 DNS、LB 或 Ingress 需要由使用方显式配置。
@@ -427,23 +424,22 @@ externalControlPlane:
 | `storageClass.volumeBindingMode` | `WaitForFirstConsumer` | 多可用区 TKE 集群中等待 Pod 选中 control 节点后再创建 CBS 盘，避免 PV zone 与 control 节点不匹配 |
 | `controlPlane.enabled` | `true` | 是否部署内置控制面 |
 | `externalControlPlane.enabled` | `false` | 是否使用外部 CubeMaster |
-| `placement.controlPlane.nodeSelector` | `cube.tencent.com/role=control` | 控制 CubeMaster、CubeAPI、WebUI、cubemastercli、内置 MySQL、内置 Redis 调度范围 |
-| `placement.compute.nodeSelector` | 含 `allow-pvm-bootstrap=true` | 控制 `cube-node`、`cube-dns`、`cube-proxy-node` 调度范围，并要求节点显式允许 PVM bootstrap |
+| `placement.controlPlane.nodeSelector` | `cube.tencent.com/role=control` | 控制 CubeMaster、CubeAPI、WebUI、cubemastercli、内置 MySQL、内置 Redis、CubeProxy 调度范围 |
+| `placement.compute.nodeSelector` | 含 `allow-pvm-bootstrap=true` | 控制 `cube-node`、`cube-dns` 调度范围，并要求节点显式允许 PVM bootstrap |
 | `cubeDns.enabled` | `true` | 是否交付 CubeDNS |
 | `cubeDns.mode` | `nodeLocal` | node-local DNS 或 ClusterIP DNS |
 | `cubeDns.sandboxGateway.enabled` | `true` | node-local DNS 是否同时监听 compute HostIP，供 sandbox guest 使用 |
 | `cubeNode.dns.useCubeDns` | `true` | `cube-node` 是否显式使用 `127.0.0.54` |
-| `cubeNode.dns.sandbox.useCubeDns` | `true` | 是否把 sandbox guest `/etc/resolv.conf` 指到 cube-dns；默认写当前 compute HostIP，dedicated proxy/DNS 模式写 `dedicated.answerIPs` |
+| `cubeNode.dns.sandbox.useCubeDns` | `true` | 是否把 sandbox guest `/etc/resolv.conf` 指到 cube-dns；默认写当前 compute HostIP，让 guest 使用 node-local `cube-dns` |
 | `cubeNode.dns.sandbox.nameservers` | `[]` | 覆盖写入 sandbox guest `/etc/resolv.conf` 的 DNS server |
-| `cubeNode.sandboxServiceProxies` | `[]` | 为 sandbox 暴露指定 Kubernetes Service 的 hostNetwork HTTP proxy 和 DNS override |
-| `cubeNode.sandboxServiceProxy.dedicated.*` | 关闭 | 将 sandbox service proxy 固定部署到指定节点，并让 DNS 返回固定 proxy IP |
 | `cubeNode.pvmGuestKernel.enabled` | `true` | 是否选择 PVM guest kernel；`cube-node-init` 校验该值与 `kvm_pvm` 状态一致 |
 | `bootstrap.pvmHostKernel.enabled` | `true` | 是否执行 host kernel bootstrap；默认可能安装 host kernel 并按租约重启计算节点 |
 | `bootstrap.pvmHostKernel.bootArgs` | `nopti pti=off` | PVM host kernel 启动参数；当前 `kvm_pvm` 不支持 host KPTI，默认关闭 PTI |
 | `bootstrap.nodeInit.*` | 多项 | 控制节点预检、XFS、KVM、CIDR 检测 |
 | `mysql.host` | `""` | 非空时使用第三方 MySQL |
 | `redis.host` | `""` | 非空时使用第三方 Redis |
-| `cubeProxy.enabled` | `true` | 是否部署 CubeProxy 数据面入口 |
+| `cubeProxy.enabled` | `true` | 是否部署 control 节点 CubeProxy 数据面入口 |
+| `cubeProxy.advertiseIP` | `""` | `cubeDns.answerIP` 为空时返回给 `cube.app` / wildcard 的 control 节点 CubeProxy 入口 IP |
 | `cubeEgress.enabled` | `true` | 是否在 Big Pod 中启用 egress sidecar |
 | `webui.enabled` | `true` | 是否部署 WebUI |
 | `controlPlane.templateBuilder.enabled` | `false` | 是否启用模板构建 sidecar |
@@ -454,7 +450,7 @@ externalControlPlane:
 
 | Test Pod | 覆盖内容 |
 | --- | --- |
-| `<release>-health-test` | CubeMaster、CubeAPI、节点注册、WebUI、CubeProxy、DaemonSet ready、Egress sidecar 存在性 |
+| `<release>-health-test` | CubeMaster、CubeAPI、节点注册、WebUI、CubeProxy、DaemonSet/Deployment/StatefulSet ready、Egress sidecar 存在性 |
 | `<release>-mysql-test` | 内置 MySQL `mysqladmin ping` |
 | `<release>-redis-test` | 内置 Redis `PING` |
 | `<release>-dns-test` | `cube.app`、wildcard、Kubernetes Service 域名解析 |

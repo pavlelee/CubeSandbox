@@ -170,6 +170,28 @@ rm -f \
   /tmp/cube/network-agent-tap.sock \
   || true
 
+stop_stale_processes() {
+  local name="$1"
+  local pattern="$2"
+  local pids
+
+  pids="$(pgrep -f "${pattern}" || true)"
+  [[ -n "${pids}" ]] || return 0
+
+  log "stopping stale ${name} process(es): ${pids//$'\n'/ }"
+  kill ${pids} 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    if ! pgrep -f "${pattern}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  pgrep -f "${pattern}" | xargs -r kill -9 2>/dev/null || true
+}
+
+stop_stale_processes network-agent "${NETWORK_AGENT_BIN}"
+stop_stale_processes cubelet "${CUBELET_BIN}"
+
 cleanup() {
   if [[ -n "${NETWORK_AGENT_PID:-}" ]]; then
     kill "${NETWORK_AGENT_PID}" 2>/dev/null || true

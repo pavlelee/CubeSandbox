@@ -246,8 +246,6 @@ spec:
             - name: CUBE_SANDBOX_DNS_SERVERS
               {{- if .Values.cubeNode.dns.sandbox.nameservers }}
               value: {{ join "," . | quote }}
-              {{- else if and .Values.cubeNode.sandboxServiceProxy.dedicated.enabled .Values.cubeNode.sandboxServiceProxy.dedicated.dns.enabled .Values.cubeNode.sandboxServiceProxy.dedicated.answerIPs }}
-              value: {{ join "," .Values.cubeNode.sandboxServiceProxy.dedicated.answerIPs | quote }}
               {{- else if and .Values.cubeNode.dns.sandbox.useCubeDns .Values.cubeDns.enabled (eq .Values.cubeDns.mode "nodeLocal") .Values.cubeDns.sandboxGateway.enabled }}
               value: "$(CUBE_SANDBOX_NODE_IP)"
               {{- else }}
@@ -313,63 +311,6 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-        {{- if and .Values.cubeNode.sandboxServiceProxies (not .Values.cubeNode.sandboxServiceProxy.dedicated.enabled) }}
-        - name: sandbox-service-proxy
-          image: {{ include "cube.image" .Values.images.cubeEgress | quote }}
-          imagePullPolicy: {{ .Values.images.cubeEgress.pullPolicy }}
-          command:
-            - /bin/bash
-            - -ec
-            - |
-              mkdir -p /tmp/sandbox-service-proxy/conf /tmp/sandbox-service-proxy/logs
-              cat > /tmp/sandbox-service-proxy/conf/nginx.conf <<'NGINX'
-              worker_processes 1;
-              error_log /dev/stderr info;
-              pid /tmp/sandbox-service-proxy/nginx.pid;
-              events {
-                  worker_connections 1024;
-              }
-              http {
-                  access_log /dev/stdout;
-                  proxy_connect_timeout 5s;
-                  proxy_send_timeout 60s;
-                  proxy_read_timeout 60s;
-                  {{- range $i, $proxy := .Values.cubeNode.sandboxServiceProxies }}
-                  server {
-                      listen 0.0.0.0:{{ .listenPort }};
-                      {{- if .upstreamResolver }}
-                      resolver {{ .upstreamResolver }} valid=30s ipv6=off;
-                      set $sandbox_proxy_upstream_{{ $i }} "{{ .upstreamHost }}:{{ .upstreamPort }}";
-                      {{- end }}
-                      location / {
-                          proxy_http_version 1.1;
-                          proxy_set_header Host {{ default .upstreamHost .upstreamHostHeader | quote }};
-                          proxy_set_header X-Forwarded-For "";
-                          proxy_set_header X-Real-IP "";
-                          proxy_set_header Forwarded "";
-                          {{- if .upstreamResolver }}
-                          proxy_pass http://$sandbox_proxy_upstream_{{ $i }};
-                          {{- else }}
-                          proxy_pass http://{{ .upstreamHost }}:{{ .upstreamPort }};
-                          {{- end }}
-                      }
-                  }
-                  {{- end }}
-              }
-              NGINX
-              exec /usr/local/openresty/nginx/sbin/nginx -p /tmp/sandbox-service-proxy -c conf/nginx.conf -g 'daemon off;'
-          securityContext:
-            privileged: {{ .Values.security.privileged }}
-            capabilities:
-              add:
-                - NET_BIND_SERVICE
-          env:
-            {{- include "cube.timezoneEnv" . | nindent 12 }}
-          {{- with .Values.cubeNode.resources }}
-          resources:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-        {{- end }}
         {{- if .Values.cubeEgress.enabled }}
         - name: cube-egress
           image: {{ include "cube.image" .Values.images.cubeEgress | quote }}

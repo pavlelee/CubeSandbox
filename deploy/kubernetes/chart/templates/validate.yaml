@@ -34,29 +34,6 @@
 {{- if and .Values.cubeNode.dns.sandbox.useCubeDns (ne .Values.cubeDns.mode "nodeLocal") }}
 {{- fail "cubeNode.dns.sandbox.useCubeDns=true requires cubeDns.mode=nodeLocal" }}
 {{- end }}
-{{- range $i, $proxy := .Values.cubeNode.sandboxServiceProxies }}
-{{- if not $proxy.name }}
-{{- fail (printf "cubeNode.sandboxServiceProxies[%d].name is required" $i) }}
-{{- end }}
-{{- if not $proxy.listenPort }}
-{{- fail (printf "cubeNode.sandboxServiceProxies[%d].listenPort is required" $i) }}
-{{- end }}
-{{- if not $proxy.upstreamHost }}
-{{- fail (printf "cubeNode.sandboxServiceProxies[%d].upstreamHost is required" $i) }}
-{{- end }}
-{{- if not $proxy.upstreamPort }}
-{{- fail (printf "cubeNode.sandboxServiceProxies[%d].upstreamPort is required" $i) }}
-{{- end }}
-{{- if not $proxy.dnsNames }}
-{{- fail (printf "cubeNode.sandboxServiceProxies[%d].dnsNames must contain at least one hostname" $i) }}
-{{- end }}
-{{- end }}
-{{- if and .Values.cubeNode.sandboxServiceProxy.dedicated.enabled (not .Values.cubeNode.sandboxServiceProxy.dedicated.answerIPs) }}
-{{- fail "cubeNode.sandboxServiceProxy.dedicated.enabled=true requires cubeNode.sandboxServiceProxy.dedicated.answerIPs" }}
-{{- end }}
-{{- if and .Values.cubeNode.sandboxServiceProxy.dedicated.enabled .Values.cubeNode.sandboxServiceProxy.dedicated.dns.enabled (not .Values.cubeDns.enabled) }}
-{{- fail "cubeNode.sandboxServiceProxy.dedicated.dns.enabled=true requires cubeDns.enabled=true" }}
-{{- end }}
 {{- end }}
 {{- if .Values.externalControlPlane.enabled }}
 {{- if not .Values.externalControlPlane.masterEndpoint }}
@@ -75,8 +52,8 @@
 {{- fail "control plane master requires redis.host when redis.enabled=false" }}
 {{- end }}
 {{- if eq (include "cube.proxyEnabled" .) "true" }}
-{{- if not $computeSelector }}
-{{- fail "cubeProxy.enabled=true requires placement.compute.nodeSelector because cube-proxy-node runs on compute nodes" }}
+{{- if not $controlPlaneSelector }}
+{{- fail "cubeProxy.enabled=true requires placement.controlPlane.nodeSelector because CubeProxy runs on control nodes" }}
 {{- end }}
 {{- if and (not (eq (include "cube.redisBuiltinEnabled" .) "true")) (not .Values.redis.host) (not .Values.cubeProxy.redis.host) }}
 {{- fail "cubeProxy.enabled=true requires redis.host or cubeProxy.redis.host when redis.enabled=false" }}
@@ -97,7 +74,7 @@
 {{- fail "cubeProxy.sidecar.adminToken is not supported until CubeProxy nginx admin server token injection is chart-managed; leave it empty" }}
 {{- end }}
 {{- if not .Values.cubeProxy.hostNetwork }}
-{{- fail "cubeProxy.hostNetwork=true is required to keep CubeProxy aligned with one-click node-local ingress semantics" }}
+{{- fail "cubeProxy.hostNetwork=true is required to keep CubeProxy aligned with one-click control-node ingress semantics" }}
 {{- end }}
 {{- if and .Values.cubeProxy.hostNetwork .Values.cubeProxy.ports.http.hostPort (ne (int .Values.cubeProxy.ports.http.hostPort) (int .Values.cubeProxy.ports.http.containerPort)) }}
 {{- fail "cubeProxy.hostNetwork=true requires cubeProxy.ports.http.hostPort to equal cubeProxy.ports.http.containerPort or be empty" }}
@@ -133,8 +110,8 @@
 {{- if and .Values.cubeDns.sandboxGateway.enabled (ne .Values.cubeDns.mode "nodeLocal") }}
 {{- fail "cubeDns.sandboxGateway.enabled=true requires cubeDns.mode=nodeLocal" }}
 {{- end }}
-{{- if and (eq .Values.cubeDns.mode "service") (not .Values.cubeDns.answerIP) }}
-{{- fail "cubeDns.mode=service requires cubeDns.answerIP because CubeProxy is exposed only as a node-local hostNetwork DaemonSet" }}
+{{- if and (eq .Values.cubeDns.mode "service") (not (default .Values.cubeProxy.advertiseIP .Values.cubeDns.answerIP)) }}
+{{- fail "cubeDns.mode=service requires cubeDns.answerIP or cubeProxy.advertiseIP because CubeProxy is exposed on control-node hostNetwork" }}
 {{- end }}
 {{- if not (default .Values.cubeProxy.domain .Values.cubeDns.domain) }}
 {{- fail "cubeDns.enabled=true requires cubeDns.domain or cubeProxy.domain" }}

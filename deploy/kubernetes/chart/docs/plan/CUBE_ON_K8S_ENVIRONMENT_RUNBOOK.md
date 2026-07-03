@@ -7,8 +7,8 @@
 - 如何通过跳板机操作当前 TKE/K8S 集群。
 - 如何操作当前 Cube compute 节点。
 - 当前部署了哪些 Cube / AgentWay 组件。
-- 当前环境是如何部署和更新的。
-- 如何复现和验证非 owner CubeProxy 访问 sandbox 的问题。
+- 当前环境如何删除旧 Chart、渲染并部署 v0.5.0 Chart。
+- 如何通过 API 创建 sandbox 并执行 Hello 代码完成端到端验收。
 
 本文记录当前测试环境的操作方式和现场状态，方便后续 agent 直接接手排查。所有 K8S 操作必须先通过跳板机 `106.53.31.91` 执行。
 
@@ -154,13 +154,13 @@ Compute toleration：
   effect: NoSchedule
 ```
 
-其中 `cube-node`、`cube-proxy-node`、`cube-dns` 均复用 compute placement；`cube-master`、`cube-api`、`cube-webui`、`cube-cubemastercli`、`cube-mysql`、`cube-redis` 复用 control placement。Chart 默认通过 `global.timezone=Asia/Shanghai` 给 Cube 容器、initContainer 和 sidecar 注入 `TZ`。
+其中 `cube-node`、`cube-dns` 复用 compute placement；`cube-master`、`cube-api`、`cube-webui`、`cube-cubemastercli`、`cube-mysql`、`cube-redis`、`cube-proxy-node` 复用 control placement。Chart 默认通过 `global.timezone=Asia/Shanghai` 给 Cube 容器、initContainer 和 sidecar 注入 `TZ`。
 
 查询命令：
 
 ```bash
 rtk /tmp/cube_ssh.exp 106.53.31.91 \
-  'kubectl -n cube-system get ds cube-node cube-proxy-node cube-dns -o wide'
+  'kubectl -n cube-system get deploy,sts,ds,pod -o wide'
 ```
 
 ## Namespace 与部署组件
@@ -183,36 +183,37 @@ rtk /tmp/cube_ssh.exp 106.53.31.91 \
   'kubectl -n cube-system get secret -l owner=helm,name=cube'
 ```
 
-控制面 Deployment：
+v0.5.0 目标控制面 Deployment / StatefulSet：
 
 ```text
-cube-master        ccr.ccs.tencentyun.com/pavleli/cube-master:v0.4.0
-cube-api           ccr.ccs.tencentyun.com/pavleli/cube-api:v0.4.0
-cube-webui         ccr.ccs.tencentyun.com/pavleli/cube-webui:v0.4.0
-cube-cubemastercli ccr.ccs.tencentyun.com/pavleli/cubemastercli:v0.4.0
-cube-mysql         mysql:8.0
-cube-redis         redis:7-alpine
+cube-master        docker.io/liv1020/cube-master:v0.5.0
+cube-api           docker.io/liv1020/cube-api:v0.5.0
+cube-webui         docker.io/liv1020/cube-webui:v0.5.0
+cube-cubemastercli docker.io/liv1020/cubemastercli:v0.5.0
+cube-proxy-node    docker.io/liv1020/cube-proxy-node:v0.5.0
+cube-mysql         StatefulSet, mysql:8.0
+cube-redis         StatefulSet, redis:7-alpine
 ```
 
 这些 Pod 当前按 `placement.controlPlane` 运行在 `10.2.5.44` / `10.2.5.54`。
 
-计算面 DaemonSet：
+v0.5.0 目标计算面 DaemonSet：
 
 ```text
 cube-node
-  - ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627
-  - ccr.ccs.tencentyun.com/pavleli/cube-egress:v0.4.0
-  - ccr.ccs.tencentyun.com/pavleli/cube-egress-net:v0.4.0
-
-cube-proxy-node
-  - ccr.ccs.tencentyun.com/pavleli/cube-proxy-node:v0.4.0
+  - docker.io/liv1020/cube-node:v0.5.0
+  - docker.io/liv1020/cube-egress:v0.5.0
+  - docker.io/liv1020/cube-egress-net:v0.5.0
+  - docker.io/liv1020/cube-node-init:v0.5.0
+  - docker.io/liv1020/cube-pvm-host-bootstrap:v0.5.0
 
 cube-dns
   - ccr.ccs.tencentyun.com/tkeimages/coredns:v1.11.1-tke.1
 ```
 
-这三个 DaemonSet 当前都部署在 `10.2.16.125`、`10.2.16.157`、
-`10.2.222.49`、`10.2.222.82` 四台 compute 节点上。
+`cube-node`、`cube-dns` 部署在 `10.2.16.125`、`10.2.16.157`、
+`10.2.222.49`、`10.2.222.82` 四台 compute 节点上。`cube-proxy-node`
+从 v0.5.0 起不再是 compute DaemonSet，而是 control 节点上的 Deployment。
 
 ### Sandbox 内 Kubernetes Service DNS
 
@@ -222,85 +223,16 @@ cube-dns
 `127.0.0.54` 作为 sandbox guest 的 nameserver，因为在 guest 内它会变成
 sandbox 自己的 loopback。
 
-如果需要 sandbox 内解析并访问 Kubernetes Service 名称，例如：
+如果需要 sandbox 内解析并访问 Kubernetes Service 名称，例如
+`agent-way-model-gateway.agent-infra.svc.cluster.local`，不要假设 sandbox
+直接访问 Service ClusterIP 一定可行。CubeVS eBPF egress 可能绕过宿主机
+kube-proxy 的 Service VIP DNAT；节点上 `curl <ClusterIP>` 能通，不代表
+sandbox 里访问 ClusterIP 能通。
 
-```text
-agent-way-model-gateway.agent-infra
-agent-way-model-gateway.agent-infra.svc.cluster.local
-```
-
-不要让 sandbox 直接访问 Kubernetes Service ClusterIP。CubeVS eBPF egress
-会直接把包 redirect 到节点网卡，绕过宿主机 kube-proxy 的 Service VIP DNAT；
-因此节点上 `curl <ClusterIP>` 能通，不代表 sandbox 里访问 ClusterIP 能通。
-
-长期方案是在 hostNetwork 上暴露 sandbox service proxy/DNS。简单环境可把
-proxy 作为 compute Big Pod sidecar 并返回当前 compute 节点 HostIP；当前
-TKE 环境存在同节点 hairpin 超时，因此使用固定的 dedicated 节点
-`10.2.36.21`，让 `cube-dns` 对这些 Service 名称返回该 dedicated IP：
-
-```yaml
-cubeDns:
-  sandboxGateway:
-    enabled: true
-
-cubeNode:
-  dns:
-    sandbox:
-      useCubeDns: true
-  sandboxServiceProxy:
-    dedicated:
-      enabled: true
-      nodeName: 10.2.36.21
-      answerIPs:
-        - 10.2.36.21
-  sandboxServiceProxies:
-    - name: agent-way-model-gateway
-      listenPort: 4000
-      upstreamHost: agent-way-model-gateway.agent-infra.svc.cluster.local
-      upstreamPort: 4000
-      upstreamResolver: 172.19.166.188
-      upstreamHostHeader: agent-way-model-gateway.agent-infra.svc.cluster.local
-      answerIPs:
-        - 10.2.36.21
-      dnsNames:
-        - agent-way-model-gateway.agent-infra
-        - agent-way-model-gateway.agent-infra.svc.cluster.local
-```
-
-Chart 行为：
-
-```text
-cube-dns:
-  bind 127.0.0.54 {$NODE_IP}
-  template agent-way-model-gateway.agent-infra -> 10.2.36.21
-  template agent-way-model-gateway.agent-infra.svc.cluster.local -> 10.2.36.21
-
-cube-node:
-  CUBE_SANDBOX_DNS_SERVERS=10.2.36.21
-
-sandbox-service-proxy:
-  listen 0.0.0.0:4000
-  resolver 172.19.166.188
-  proxy_pass http://agent-way-model-gateway.agent-infra.svc.cluster.local:4000
-```
-
-这里的 `upstreamResolver` 必须使用真实 kube-dns ClusterIP。因为
-`cube-dns` 已经把 `agent-way-model-gateway.agent-infra.svc.cluster.local`
-覆盖成 dedicated IP，proxy 如果继续使用 `cube-dns` 解析上游，会解析回
-自己形成自环。
-
-`cube-node` 镜像启动脚本会把 `CUBE_SANDBOX_DNS_SERVERS` 写入 Cubelet
-dynamicconf 的 `default_dns_servers`。现有 Cubelet 只支持生成
-`nameserver` 行，不支持 search/options；短域名由 `cube-dns` 的精确
-template 记录兜底。
-
-AgentWay Provider 侧需要允许 sandbox 访问 dedicated proxy/DNS IP。当前
-环境热验证时也放行了两台 compute HostIP，便于兼容 node-local 验证路径：
-
-```bash
-rtk /tmp/cube_ssh.exp 106.53.31.91 \
-  'kubectl patch agentsandboxproviders.agent.agentway.io cube --type merge -p '\''{"spec":{"cube":{"allowOut":["10.2.36.21/32","172.16.0.0/12","10.2.0.0/16"]}}}'\'''
-```
+v0.5.0 Chart 已删除 sandbox service proxy 资源，不再在 Chart 内为这类
+Service 自动生成 hostNetwork HTTP proxy 或 DNS override。需要暴露给
+sandbox 的 in-cluster Service 应由平台网络层、AgentWay provider 配置或
+operator 管理的外部代理处理。
 
 Service：
 
@@ -308,11 +240,11 @@ Service：
 cube-master ClusterIP 8089
 cube-api    ClusterIP 3000
 cube-webui  ClusterIP 12088
-cube-mysql  ClusterIP 3306
-cube-redis  ClusterIP 6379
+cube-mysql  Headless Service 3306, backs StatefulSet cube-mysql
+cube-redis  Headless Service 6379, backs StatefulSet cube-redis
 ```
 
-注意：当前 Chart 不创建 `cube-proxy-node` ClusterIP Service。CubeProxy 使用 DaemonSet + hostNetwork 直接监听节点 `80/443`，避免 ClusterIP 随机分流破坏 One Click 数据面语义。
+注意：当前 Chart 不创建 `cube-proxy-node` ClusterIP Service。CubeProxy 使用 control 节点 Deployment + hostNetwork 直接监听节点 `80/443`，避免 ClusterIP 随机分流破坏 One Click 数据面语义。渲染 live values 时必须设置 `cubeProxy.advertiseIP` 或 `cubeDns.answerIP` 指向 control CubeProxy 入口。
 
 状态存储：
 
@@ -321,9 +253,9 @@ StorageClass: cube-cbs-wffc
 volumeBindingMode: WaitForFirstConsumer
 
 PVC:
-cube-master-storage  20Gi
-cube-mysql-data      20Gi
-cube-redis-data      10Gi
+cube-master-storage       20Gi
+mysql-data-cube-mysql-0   20Gi
+redis-data-cube-redis-0   10Gi
 ```
 
 当前控制面状态组件默认使用 PVC，不再使用 hostPath。`cube-cbs-wffc` 使用 WFFC，目的是让 CBS 盘在 Pod 选中 control 节点后再创建，避免多可用区 TKE 集群中 PV zone 与 Pod zone 不匹配。
@@ -356,9 +288,6 @@ spec:
       - 10.2.222.49
       - 10.2.222.82
     allowOut:
-      - 10.2.36.21/32
-      - 10.2.5.16/32
-      - 10.2.5.189/32
       - 172.16.0.0/12
       - 10.2.0.0/16
     networkType: tap
@@ -376,7 +305,7 @@ rtk /tmp/cube_ssh.exp 106.53.31.91 \
 
 注意：
 
-- `proxyBaseURL` 当前固定为 `http://43.144.18.240.sslip.io`，用于生成公网可访问的 Agent `accessURL`。
+- `proxyBaseURL` 必须指向当前 control 节点 CubeProxy 入口，用于生成公网可访问的 Agent `accessURL`。
 - 判断 sandbox owner 节点不要只看 `accessURL`，必须查 Redis 中的 `HostIP`。
 - `distributionScope` 当前按 K8S compute selector 对齐为：
   `10.2.16.125`、`10.2.16.157`、`10.2.222.49`、`10.2.222.82`。
@@ -386,56 +315,56 @@ rtk /tmp/cube_ssh.exp 106.53.31.91 \
 当前 Cube 资源是 Helm release `cube` 安装出来的，Chart 源在本仓库：
 
 ```text
-deploy/k8s/chart
+deploy/kubernetes/chart
 ```
 
-跳板机上曾保留一份 Chart 目录：
+跳板机上没有可用的 `helm`，live 环境使用本地 `helm template` 渲染，再把渲染结果传到跳板机执行 `kubectl apply`。v0.5.0 会把 `cube-proxy-node` 从 DaemonSet 改为 Deployment，把 MySQL/Redis 改为 StatefulSet；现场部署前先删除旧 `cube-system` namespace，避免旧资源和旧 PVC 名称残留影响验证。
 
-```text
-/tmp/cube-chart-current/chart
-```
-
-历史安装命令形态如下，需在有 `helm` 和 kubeconfig 的机器上执行：
-
-```bash
-helm upgrade --install cube deploy/k8s/chart \
-  -n cube-system \
-  --create-namespace \
-  --wait \
-  --timeout 30m
-```
-
-本轮排查中，跳板机无 `helm`，live 环境更新方式是本地 `helm template` 渲染，再把渲染结果传到跳板机执行 `kubectl apply`。渲染时保留已有 TLS/CA Secret，避免本地 `helm template` 因没有集群 `lookup` 而生成新证书：
-
-```bash
-rtk helm template cube deploy/k8s/chart \
-  -n cube-system \
-  --output-dir /tmp/cube-rendered-live \
-  --set cubeProxy.tls.mode=existingSecret \
-  --set cubeProxy.tls.existingSecret=cube-proxy-certs \
-  --set cubeEgress.ca.mode=existingSecret \
-  --set cubeEgress.ca.existingSecret=cube-egress-ca
-
-rtk tar -czf /tmp/cube-rendered-live.tgz -C /tmp cube-rendered-live
-rtk scp /tmp/cube-rendered-live.tgz root@106.53.31.91:/tmp/cube-rendered-live.tgz
-```
-
-如果只是滚动 `cube-node` 到已验证修复镜像，可直接用：
+删除旧 Chart：
 
 ```bash
 rtk /tmp/cube_ssh.exp 106.53.31.91 \
-  'kubectl -n cube-system set image daemonset/cube-node cube-node=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627'
-
-rtk /tmp/cube_ssh.exp 106.53.31.91 \
-  'kubectl -n cube-system rollout status ds/cube-node --timeout=10m'
+  'kubectl delete ns cube-system --wait=true --timeout=20m || true'
 ```
 
-当前 `cube-node` 已切到已验证修复镜像：
+确认 control 入口 IP。`cubeProxy.advertiseIP` 应设置为要暴露给 `cube.app` / wildcard 的 control CubeProxy IP 或 LB IP：
 
-```text
-ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627
-imagePullPolicy: Always
-imageID: sha256:9fd575a09d2cdbb5eea6904796d8e7c504f88c59c37a806c8048347d87f3697e
+```bash
+rtk /tmp/cube_ssh.exp 106.53.31.91 \
+  'kubectl get nodes -l cube.tencent.com/role=control -o wide'
+```
+
+本地渲染并传输：
+
+```bash
+CONTROL_PROXY_IP=<control-node-or-lb-ip>
+
+rtk rm -rf /tmp/cube-rendered-v050
+rtk helm template cube deploy/kubernetes/chart \
+  -n cube-system \
+  --output-dir /tmp/cube-rendered-v050 \
+  --set cubeProxy.advertiseIP="${CONTROL_PROXY_IP}" \
+  --set cubeDns.answerIP="${CONTROL_PROXY_IP}"
+
+rtk tar -czf /tmp/cube-rendered-v050.tgz -C /tmp cube-rendered-v050
+rtk scp /tmp/cube-rendered-v050.tgz root@106.53.31.91:/tmp/cube-rendered-v050.tgz
+```
+
+跳板机 apply 并等待：
+
+```bash
+rtk /tmp/cube_ssh.exp 106.53.31.91 \
+  'set -e
+   rm -rf /tmp/cube-rendered-v050
+   tar -xzf /tmp/cube-rendered-v050.tgz -C /tmp
+   kubectl create ns cube-system --dry-run=client -o yaml | kubectl apply -f -
+   find /tmp/cube-rendered-v050/cube/templates -maxdepth 1 -type f -name "*.yaml" -exec kubectl -n cube-system apply -f {} \;'
+
+rtk /tmp/cube_ssh.exp 106.53.31.91 \
+  'kubectl -n cube-system rollout status deploy/cube-master --timeout=20m && kubectl -n cube-system rollout status deploy/cube-api --timeout=20m && kubectl -n cube-system rollout status deploy/cube-proxy-node --timeout=20m && kubectl -n cube-system rollout status sts/cube-mysql --timeout=20m && kubectl -n cube-system rollout status sts/cube-redis --timeout=20m && kubectl -n cube-system rollout status ds/cube-dns --timeout=20m && kubectl -n cube-system rollout status ds/cube-node --timeout=30m'
+
+rtk /tmp/cube_ssh.exp 106.53.31.91 \
+  'kubectl -n cube-system get deploy,sts,ds,pod -o wide'
 ```
 
 注意：如果现场把 MySQL 从旧 hostPath 切到新 PVC，或删除重建 MySQL PVC，`cube-node` 可能已经在旧库注册过，随后只继续上报 `t_cube_node_status`，不会自动补 `t_cube_node_registration`。这时创建 sandbox 会报：
@@ -451,7 +380,7 @@ rtk /tmp/cube_ssh.exp 106.53.31.91 \
   'kubectl -n cube-system rollout restart ds/cube-node && kubectl -n cube-system rollout status ds/cube-node --timeout=5m'
 
 rtk /tmp/cube_ssh.exp 106.53.31.91 \
-  'kubectl -n cube-system exec deploy/cube-mysql -- sh -lc '\''mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "select node_id,host_ip,quota_cpu,quota_mem_mb,max_mvm_num,updated_at from t_cube_node_registration;"'\'''
+  'kubectl -n cube-system exec cube-mysql-0 -- sh -lc '\''mysql -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" "$MYSQL_DATABASE" -e "select node_id,host_ip,quota_cpu,quota_mem_mb,max_mvm_num,updated_at from t_cube_node_registration;"'\'''
 ```
 
 当前已确认新 compute 节点重新注册成功：
@@ -524,7 +453,7 @@ cube-node DaemonSet 4/4 READY
 cube-node DaemonSet pvm-host-bootstrap env contains PVM_KERNEL_BOOT_ARGS=nopti pti=off
 ```
 
-长期修复已经落到 `deploy/images/scripts/pvm-host-bootstrap.sh`：
+长期修复已经落到 `deploy/kubernetes/images/scripts/pvm-host-bootstrap.sh`：
 当节点已经运行 PVM kernel 但缺少 `PVM_KERNEL_BOOT_ARGS` 时，不再提前
 退出，而是补 bootloader 参数并通过独立的 `boot-args-reboot-count`
 触发一次协调重启。发布时需要用该脚本重新构建并推送
@@ -981,9 +910,9 @@ state storage: cube-cbs-wffc PVC
 相关背景文档：
 
 ```text
-deploy/k8s/chart/docs/plan/CUBEVS_HOSTPORT_CHECKSUM_FIX_REPORT.md
-deploy/k8s/chart/docs/plan/CUBE_ON_K8S_NON_OWNER_ROOT_CAUSE_REPORT.md
-deploy/k8s/chart/docs/plan/ONE_CLICK_NON_OWNER_LINK_DEPLOYMENT_REPORT.md
-deploy/k8s/chart/docs/plan/FINAL_ONE_CLICK_PARITY_PLAN.md
-deploy/k8s/chart/docs/ARCHITECTURE.md
+deploy/kubernetes/chart/docs/plan/CUBEVS_HOSTPORT_CHECKSUM_FIX_REPORT.md
+deploy/kubernetes/chart/docs/plan/CUBE_ON_K8S_NON_OWNER_ROOT_CAUSE_REPORT.md
+deploy/kubernetes/chart/docs/plan/ONE_CLICK_NON_OWNER_LINK_DEPLOYMENT_REPORT.md
+deploy/kubernetes/chart/docs/plan/FINAL_ONE_CLICK_PARITY_PLAN.md
+deploy/kubernetes/chart/docs/ARCHITECTURE.md
 ```

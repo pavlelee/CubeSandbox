@@ -1,12 +1,30 @@
 {{- if eq (include "cube.redisBuiltinEnabled" .) "true" }}
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Service
 metadata:
   name: {{ include "cube.redisName" . }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: redis
 spec:
+  clusterIP: None
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: redis
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cube.redisName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "cube.redisName" . }}
   replicas: 1
   selector:
     matchLabels:
@@ -71,55 +89,33 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
-      {{- if .Values.redis.persistence.enabled }}
+      {{- if and .Values.redis.persistence.enabled (or .Values.redis.persistence.hostPath .Values.redis.persistence.existingClaim) }}
       volumes:
         - name: redis-data
           {{- if .Values.redis.persistence.hostPath }}
           hostPath:
             path: {{ .Values.redis.persistence.hostPath | quote }}
             type: DirectoryOrCreate
-          {{- else if .Values.redis.persistence.existingClaim }}
-          persistentVolumeClaim:
-            claimName: {{ include "cube.redisPVCName" . }}
           {{- else }}
           persistentVolumeClaim:
             claimName: {{ include "cube.redisPVCName" . }}
           {{- end }}
       {{- end }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "cube.redisName" . }}
-  labels:
-    {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redis
-spec:
-  type: ClusterIP
-  selector:
-    {{- include "cube.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: redis
-  ports:
-    - name: redis
-      port: {{ .Values.redis.port }}
-      targetPort: redis
-{{- if and .Values.redis.persistence.enabled (not .Values.redis.persistence.hostPath) (not .Values.redis.persistence.existingClaim) }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: {{ include "cube.redisPVCName" . }}
-  labels:
-    {{- include "cube.labels" . | nindent 4 }}
-    app.kubernetes.io/component: redis
-spec:
-  accessModes:
-    {{- toYaml .Values.redis.persistence.accessModes | nindent 4 }}
-  resources:
-    requests:
-      storage: {{ .Values.redis.persistence.size | quote }}
-  {{- if .Values.redis.persistence.storageClassName }}
-  storageClassName: {{ .Values.redis.persistence.storageClassName | quote }}
+  {{- if and .Values.redis.persistence.enabled (not .Values.redis.persistence.hostPath) (not .Values.redis.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          {{- include "cube.labels" . | nindent 10 }}
+          app.kubernetes.io/component: redis
+      spec:
+        accessModes:
+          {{- toYaml .Values.redis.persistence.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.persistence.size | quote }}
+        {{- if .Values.redis.persistence.storageClassName }}
+        storageClassName: {{ .Values.redis.persistence.storageClassName | quote }}
+        {{- end }}
   {{- end }}
-{{- end }}
 {{- end }}

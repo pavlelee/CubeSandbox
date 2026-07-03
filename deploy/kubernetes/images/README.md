@@ -5,23 +5,43 @@ This directory contains image build definitions used by the Kubernetes/TKE chart
 ## Build entrypoint
 
 ```bash
-PUSH=1 REGISTRY=<registry>/<namespace> IMAGE_TAG=v0.4.0 ./deploy/images/build-cube-images.sh
+PUSH=1 REGISTRY=docker.io/liv1020 IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Use `NO_CACHE=1` when every Docker image layer must be rebuilt instead of
 using Docker's build cache:
 
 ```bash
-NO_CACHE=1 PUSH=1 REGISTRY=<registry>/<namespace> IMAGE_TAG=v0.4.0 ./deploy/images/build-cube-images.sh
+NO_CACHE=1 PUSH=1 REGISTRY=docker.io/liv1020 IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
-The script reuses valid artifacts already present under `deploy/images/.work/downloads`
+The script defaults its temporary `BUILD_ROOT` to
+`/tmp/cube-kubernetes-images-<version>` so large image contexts and downloads do
+not land in the Git worktree. Override `BUILD_ROOT` only when you intentionally
+want a different cache location.
+
+The script reuses valid artifacts already present under `${BUILD_ROOT}/downloads`
 and does not require a `.complete` marker.
+
+When the release package is older than the verified Kubernetes node runtime,
+build `cube-node` by rebasing a known-good node image and copying the current
+entrypoint into it:
+
+```bash
+CUBE_NODE_BASE_IMAGE=ccr.ccs.tencentyun.com/pavleli/cube-node:v0.4.0-cubevsfix-20260627 \
+  PUSH=1 REGISTRY=docker.io/liv1020 IMAGE_TAG=v0.5.0 \
+  ./deploy/kubernetes/images/build-cube-images.sh
+```
+
+This keeps the CubeVS/network-agent runtime fix while preserving the chart-side
+entrypoint behavior.
 
 ## Image source policy
 
-- `cube-node` continues to use `deploy/images/cube-node/Dockerfile`.
+- `cube-node` continues to use `deploy/kubernetes/images/cube-node/Dockerfile`.
   It is a Kubernetes delivery image that bundles the node-side runtime components required by the Cube Node Big Pod, including `Cubelet`, `network-agent`, `cube-shim`, `cube-kernel-scf`, `cube-image`, `cube-vs`, and `cube-snapshot`. `cube-egress` is intentionally not bundled in this image because it is delivered as a separate sidecar image.
+  If `CUBE_NODE_BASE_IMAGE` is set, the build script rebases that image instead
+  and only replaces `/usr/local/bin/cube-node-entrypoint.sh`.
 - `cube-node-init` and `cube-pvm-host-bootstrap` are Kubernetes Init Container images and stay in this delivery image directory.
 - `cube-master` is built directly from `CubeMaster/docker/Dockerfile`. The build script prepares a temporary Docker context with the release-package `cubemaster` binary and the `CubeMaster/docker/tools` directory expected by that Dockerfile.
 - `cube-api` is built from `CubeAPI/Dockerfile`; no duplicate Dockerfile is kept here.
@@ -41,8 +61,8 @@ and does not require a `.complete` marker.
   `/cubeapi/` proxies to the chart-managed CubeAPI Service.
 - The template builder sidecar uses a dind image by default; no duplicate Dockerfile is kept here.
 
-The Helm chart stays under `deploy/k8s/chart`; image build logic stays here to avoid coupling chart templates with image construction.
+The Helm chart stays under `deploy/kubernetes/chart`; image build logic stays here to avoid coupling chart templates with image construction.
 
 `build-cube-images.sh` copies only the scripts required by each image into that image's build context. Do not add generic helper scripts here unless they are referenced by a Dockerfile or explicitly copied by the build script.
 
-CubeMaster runtime configuration is delivered by the Helm chart from `deploy/k8s/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubemaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `CubeMaster/pkg/base/dao/migrate/migrations/mysql`; this image build does not package a second SQL copy.
+CubeMaster runtime configuration is delivered by the Helm chart from `deploy/kubernetes/chart/files/cube-master/conf.yaml` as a Secret mounted at `/usr/local/services/cubemaster/conf.yaml`. CubeMaster schema migrations are embedded in the `cubemaster` binary at compile time from `CubeMaster/pkg/base/dao/migrate/migrations/mysql`; this image build does not package a second SQL copy.

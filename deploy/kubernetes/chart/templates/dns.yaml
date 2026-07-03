@@ -1,8 +1,8 @@
 {{- if .Values.cubeDns.enabled }}
-{{- $root := . -}}
 {{- $domain := default .Values.cubeProxy.domain .Values.cubeDns.domain -}}
 {{- $domainRegex := replace "." "\\." $domain -}}
 {{- $forward := "/etc/resolv.conf" -}}
+{{- $answerIP := default .Values.cubeProxy.advertiseIP .Values.cubeDns.answerIP -}}
 {{- if .Values.cubeDns.forward.upstreams -}}
 {{- $forward = join " " .Values.cubeDns.forward.upstreams -}}
 {{- end -}}
@@ -19,12 +19,12 @@ data:
         {{- if eq .Values.cubeDns.mode "nodeLocal" }}
         bind {{ .Values.cubeDns.bindAddress }}{{- if .Values.cubeDns.sandboxGateway.enabled }} {$NODE_IP}{{- end }}
         {{- end }}
-        {{- if .Values.cubeDns.answerIP }}
+        {{- if $answerIP }}
         template IN A {{ $domain }} {
-            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ .Values.cubeDns.answerIP }}"
+            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ $answerIP }}"
         }
         template IN A (.*)\.{{ $domainRegex }} {
-            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ .Values.cubeDns.answerIP }}"
+            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ $answerIP }}"
         }
         {{- else if eq .Values.cubeDns.mode "nodeLocal" }}
         template IN A {{ $domain }} {
@@ -40,26 +40,6 @@ data:
         template IN AAAA (.*)\.{{ $domainRegex }} {
             rcode NOERROR
         }
-        {{- range $proxy := .Values.cubeNode.sandboxServiceProxies }}
-        {{- range $dnsName := $proxy.dnsNames }}
-        template IN A {{ $dnsName }} {
-            {{- if $proxy.answerIPs }}
-            {{- range $proxy.answerIPs }}
-            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ . }}"
-            {{- end }}
-            {{- else if $root.Values.cubeNode.sandboxServiceProxy.dedicated.answerIPs }}
-            {{- range $root.Values.cubeNode.sandboxServiceProxy.dedicated.answerIPs }}
-            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {{ . }}"
-            {{- end }}
-            {{- else }}
-            answer "{{ "{{" }} .Name {{ "}}" }} 60 IN A {$NODE_IP}"
-            {{- end }}
-        }
-        template IN AAAA {{ $dnsName }} {
-            rcode NOERROR
-        }
-        {{- end }}
-        {{- end }}
         log
         cache 300
         forward . {{ $forward }}
@@ -84,7 +64,7 @@ spec:
         {{- include "cube.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: dns
       annotations:
-        checksum/corefile: {{ printf "%s|%s|%s|%s|%s|%t|%s|node-local-v2" $domain .Values.cubeDns.answerIP .Values.cubeDns.bindAddress .Values.cubeDns.mode $forward .Values.cubeDns.sandboxGateway.enabled (toJson .Values.cubeNode.sandboxServiceProxies) | sha256sum | quote }}
+        checksum/corefile: {{ printf "%s|%s|%s|%s|%s|%t|node-local-v3" $domain $answerIP .Values.cubeDns.bindAddress .Values.cubeDns.mode $forward .Values.cubeDns.sandboxGateway.enabled | sha256sum | quote }}
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet

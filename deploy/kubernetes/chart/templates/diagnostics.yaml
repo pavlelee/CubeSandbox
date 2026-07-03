@@ -31,6 +31,7 @@ data:
     run pods kubectl get pods -n "${NS}" -o wide
     run daemonsets kubectl get daemonsets -n "${NS}" -o wide
     run deployments kubectl get deployments -n "${NS}" -o wide
+    run statefulsets kubectl get statefulsets -n "${NS}" -o wide
     run services kubectl get services -n "${NS}" -o wide
     run endpoints kubectl get endpoints -n "${NS}" -o wide
     run events kubectl get events -n "${NS}" --sort-by=.lastTimestamp
@@ -49,9 +50,12 @@ data:
           done
     done
 
-    for ds in cube-node cube-proxy-node; do
+    for ds in cube-node; do
       run "rollout-${ds}" kubectl rollout status "daemonset/${RELEASE}-${ds#cube-}" -n "${NS}" --timeout=30s
     done
+    run rollout-proxy-node kubectl rollout status "deployment/${RELEASE}-proxy-node" -n "${NS}" --timeout=30s
+    run rollout-mysql kubectl rollout status "statefulset/${RELEASE}-mysql" -n "${NS}" --timeout=30s
+    run rollout-redis kubectl rollout status "statefulset/${RELEASE}-redis" -n "${NS}" --timeout=30s
 
     echo "diagnostics written to ${OUT}"
 {{- end }}

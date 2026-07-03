@@ -10,55 +10,55 @@ global:
 images:
   # Init container 1: installs/configures PVM host kernel and may reboot the host.
   pvmHostBootstrap:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-pvm-host-bootstrap
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-pvm-host-bootstrap
+    tag: v0.5.0
     pullPolicy: Always
 
   # Init container 2: validates KVM/XFS, prepares host directories, checks CubeMaster reachability.
   nodeInit:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-node-init
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-node-init
+    tag: v0.5.0
     pullPolicy: Always
 
   # Runtime container for Cube compute nodes. It should contain node-only components.
   node:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-node
-    tag: v0.4.0-cubevsfix-20260627
+    repository: docker.io/liv1020/cube-node
+    tag: v0.5.0
     pullPolicy: Always
 
   master:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-master
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-master
+    tag: v0.5.0
     pullPolicy: Always
 
   api:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-api
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-api
+    tag: v0.5.0
     pullPolicy: Always
 
   cubemastercli:
-    repository: ccr.ccs.tencentyun.com/pavleli/cubemastercli
-    tag: v0.4.0
+    repository: docker.io/liv1020/cubemastercli
+    tag: v0.5.0
     pullPolicy: Always
 
   proxyNode:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-proxy-node
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-proxy-node
+    tag: v0.5.0
     pullPolicy: Always
 
   cubeEgress:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-egress
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-egress
+    tag: v0.5.0
     pullPolicy: Always
 
   cubeEgressNet:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-egress-net
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-egress-net
+    tag: v0.5.0
     pullPolicy: Always
 
   webui:
-    repository: ccr.ccs.tencentyun.com/pavleli/cube-webui
-    tag: v0.4.0
+    repository: docker.io/liv1020/cube-webui
+    tag: v0.5.0
     pullPolicy: Always
 
   coredns:
@@ -94,8 +94,7 @@ placement:
         value: "true"
         effect: NoSchedule
 
-  # Compute placement is used by cube-node and node-local data-plane components
-  # including cube-proxy-node and cube-dns.
+  # Compute placement is used by cube-node and node-local cube-dns.
   compute:
     nodeSelector:
       cube.tencent.com/role: compute
@@ -238,9 +237,11 @@ cubeDns:
   # mode runs CoreDNS on Cube compute nodes and lets cube-node Pods use
   # 127.0.0.54 explicitly via dnsConfig, without modifying host /etc/resolv.conf.
   enabled: true
-  # nodeLocal: DaemonSet on Cube nodes, binds bindAddress and returns hostIP by default.
+  # nodeLocal: DaemonSet on Cube nodes, binds bindAddress. Set answerIP or
+  #            cubeProxy.advertiseIP when CubeProxy runs only on control nodes.
   # service:   Deployment + ClusterIP Service for DNS itself. Requires
-  #            answerIP for cube.app records because CubeProxy is node-local.
+  #            answerIP or cubeProxy.advertiseIP for cube.app records because
+  #            CubeProxy is exposed by control-node hostNetwork.
   mode: nodeLocal
   replicas: 1
   bindAddress: 127.0.0.54
@@ -250,9 +251,11 @@ cubeDns:
     # keeps using bindAddress.
     enabled: true
   domain: cube.app
-  # Empty answerIP in nodeLocal mode returns the local node hostIP, matching
-  # one-click CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP:-}".
-  # service mode requires answerIP because CubeProxy is not exposed by Service.
+  # Empty answerIP uses cubeProxy.advertiseIP when set. If both are empty in
+  # nodeLocal mode, cube-dns returns the local compute HostIP for older local
+  # proxy topologies; control-node CubeProxy deployments should set one of them.
+  # service mode requires answerIP or cubeProxy.advertiseIP because CubeProxy is
+  # not exposed by Service.
   answerIP: ""
   forward:
     # Empty upstreams forwards to /etc/resolv.conf. Set explicit upstreams to
@@ -347,9 +350,7 @@ cubeNode:
     sandbox:
       # DNS injected into Cube sandbox guest /etc/resolv.conf. When useCubeDns
       # is true and nameservers is empty, the chart injects the current compute
-      # node HostIP so guests use the node-local cube-dns sandboxGateway. When
-      # dedicated sandboxServiceProxy DNS is enabled, dedicated.answerIPs are
-      # injected instead.
+      # node HostIP so guests use the node-local cube-dns sandboxGateway.
       useCubeDns: true
       nameservers: []
     waitTimeoutSeconds: 120
@@ -357,41 +358,6 @@ cubeNode:
       repository: busybox
       tag: "1.36"
       pullPolicy: IfNotPresent
-
-  # Optional node-local HTTP proxies for Kubernetes Services that must be
-  # reachable from Cube sandbox guests. CubeVS eBPF egress bypasses host
-  # kube-proxy ClusterIP DNAT, so the guest should resolve these names to the
-  # compute node HostIP, or to dedicated.answerIPs in dedicated mode, and let a
-  # hostNetwork proxy connect from node network to Service.
-  sandboxServiceProxies:
-    []
-    # - name: agent-way-model-gateway
-    #   listenPort: 4000
-    #   upstreamHost: agent-way-model-gateway.agent-infra.svc.cluster.local
-    #   upstreamPort: 4000
-    #   # Set this to kube-dns ClusterIP when dnsNames override upstreamHost.
-    #   upstreamResolver: ""
-    #   upstreamHostHeader: agent-way-model-gateway.agent-infra.svc.cluster.local
-    #   # Optional per-service DNS answers. Empty uses dedicated.answerIPs when
-    #   # set, otherwise the current compute node HostIP.
-    #   answerIPs: []
-    #   dnsNames:
-    #     - agent-way-model-gateway.agent-infra
-    #     - agent-way-model-gateway.agent-infra.svc.cluster.local
-
-  sandboxServiceProxy:
-    dedicated:
-      # Run a hostNetwork proxy on a fixed non-compute or non-owner node. Use
-      # this when returning the local compute HostIP would hairpin through
-      # CubeVS and time out.
-      enabled: false
-      replicas: 1
-      nodeName: ""
-      nodeSelector: {}
-      tolerations: []
-      answerIPs: []
-      dns:
-        enabled: true
 
   env: []
   resources: {}
@@ -427,12 +393,16 @@ cubeProxy:
   # the CubeProxy entrypoint, for example *.sandbox.example.com.
   domain: cube.app
   podAnnotations: {}
-  updateStrategy:
+  replicas: 1
+  strategy:
     type: RollingUpdate
-  # One-click CubeProxy runs on the host network and must be able to reach the
-  # local sandbox bridge IPs directly. Keep this enabled for functional
-  # parity with node-local cube-dns.
+  # One-click CubeProxy is part of the control-node stack. This chart follows
+  # that model and schedules CubeProxy through placement.controlPlane.
   hostNetwork: true
+  # IP returned by cube-dns for cube.app / *.cube.app when cubeDns.answerIP is
+  # empty. Set this to the selected control node IP, or set cubeDns.answerIP
+  # directly when using an external load balancer.
+  advertiseIP: ""
   ports:
     http:
       containerPort: 80

@@ -14,7 +14,7 @@ It follows the final Big Pod delivery design:
 ## Directory
 
 ```text
-deploy/k8s/chart/
+deploy/kubernetes/chart/
   Chart.yaml
   values.yaml
   docs/
@@ -39,7 +39,7 @@ external control plane / compute-only 模式见：
 | `cube-master` | Control-plane master only. Built from `CubeMaster/docker/Dockerfile`; runs `cubemaster`; schema migrations are embedded in the binary. |
 | `cube-api` | HTTP API only. Runs `cube-api`. |
 | `cubemastercli` | Operational CLI only. Packages the real `CubeMaster/bin/cubemastercli` binary for exec-based operations. |
-| `cube-proxy-node` | Data-plane proxy. Reuses `CubeProxy/Dockerfile` and runs as a chart-managed DaemonSet when `cubeProxy.enabled=true`. |
+| `cube-proxy-node` | Data-plane proxy. Reuses `CubeProxy/Dockerfile` and runs as a chart-managed control-plane Deployment when `cubeProxy.enabled=true`. |
 | `cube-egress` | CubeEgress transparent outbound proxy. Reuses `CubeEgress/Dockerfile` and runs as a Cube Node sidecar when `cubeEgress.enabled=true`. |
 | `cube-egress-net` | Host network rule helper for CubeEgress TPROXY/ip-rule/sysctl setup. |
 | `cube-webui` | One-click WebUI static assets and OpenResty runtime. |
@@ -48,8 +48,9 @@ external control plane / compute-only 模式见：
 ## Node selection
 
 The chart separates placement into dedicated control-plane nodes and compute
-nodes. Control-plane Deployments use `placement.controlPlane`; `cube-node`,
-`cube-proxy-node`, and `cube-dns` use `placement.compute`.
+nodes. Control-plane Deployments, StatefulSets, and `cube-proxy-node` use
+`placement.controlPlane`; `cube-node` and node-local `cube-dns` use
+`placement.compute`.
 
 The chart refuses to render host-mutating compute components without
 `placement.compute.nodeSelector`. This prevents PVM bootstrap and Cube runtime
@@ -138,7 +139,7 @@ kernel with `kvm_pvm` loaded.
 ## Build and push images
 
 ```bash
-PUSH=1 REGISTRY=<registry>/<namespace> IMAGE_TAG=v0.4.0 ./deploy/images/build-cube-images.sh
+PUSH=1 REGISTRY=docker.io/liv1020 IMAGE_TAG=v0.5.0 ./deploy/kubernetes/images/build-cube-images.sh
 ```
 
 Cube-owned images default to `imagePullPolicy: Always` because this chart uses the release tag directly and environments are expected to pull the pushed image from the registry during deployment.
@@ -155,23 +156,23 @@ imagePullSecrets:
 ## Install
 
 ```bash
-helm upgrade --install cube ./deploy/k8s/chart   -n cube-system   --create-namespace   -f <runtime-values.yaml>   --wait   --timeout 90m
+helm upgrade --install cube ./deploy/kubernetes/chart   -n cube-system   --create-namespace   -f <runtime-values.yaml>   --wait   --timeout 90m
 ```
 
 > Do not store SSH passwords or node login credentials in this chart. Host mutation is performed through Kubernetes privileged Pods, not through SSH.
 
 ## Use third-party MySQL or Redis
 
-The chart installs `cube-mysql` only when `mysql.enabled=true` and `mysql.host` is empty.
+The chart installs `cube-mysql` StatefulSet only when `mysql.enabled=true` and `mysql.host` is empty.
 Set `mysql.host` to use an existing MySQL service; the chart will not install `cube-mysql`.
 
-The chart installs `cube-redis` only when `redis.enabled=true` and `redis.host` is empty.
+The chart installs `cube-redis` StatefulSet only when `redis.enabled=true` and `redis.host` is empty.
 Set `redis.host` to use an existing Redis service; the chart will not install `cube-redis`.
 
 ## CubeMaster configuration
 
 The `cube-master` image uses `CubeMaster/docker/Dockerfile` directly and does not carry a Kubernetes-specific entrypoint or bundled `conf.yaml`.
-The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/k8s/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubemaster/conf.yaml`; `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
+The chart stores the One-click `CubeMaster/conf.yaml` at `deploy/kubernetes/chart/files/cube-master/conf.yaml`, renders MySQL/Redis values into it, creates a release-scoped Secret named `<release>-master-config`, and mounts it to `/usr/local/services/cubemaster/conf.yaml`; `CUBE_MASTER_CONFIG_PATH` points CubeMaster to that mounted file.
 
 CubeMaster artifact storage maps to `/data/CubeMaster/storage`, matching one-click.
 The chart uses PVC-backed persistence by default so state can survive
@@ -200,6 +201,10 @@ Set `storageClassName` / `size` to tune dynamic PVCs, or `existingClaim` to
 bind pre-created volumes. Use `hostPath` only for single-node throwaway
 environments; multi-control-node deployments must use PVCs or external
 MySQL/Redis.
+
+Built-in MySQL and Redis use StatefulSet `volumeClaimTemplates` by default.
+For a release named `cube`, the generated claims are owned by the StatefulSet
+Pod, such as `mysql-data-cube-mysql-0` and `redis-data-cube-redis-0`.
 
 The default `cube-cbs-wffc` StorageClass uses `WaitForFirstConsumer`, which is
 important on TKE multi-zone clusters: CBS disks are provisioned in the same zone
@@ -242,7 +247,7 @@ carry this operational entry point.
 
 ## Cube Proxy Node
 
-`cube-proxy-node` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release instead of being left as an unmanaged DaemonSet.
+`cube-proxy-node` is a Cube data-plane component. It is enabled by default to match one-click behavior and is installed, upgraded, and uninstalled with the Cube release as a control-plane Deployment.
 
 The default TLS mode is `selfSigned`, matching the one-click mkcert-style test experience. Production environments should provide a real TLS certificate and reserve node host ports 80/443 on selected nodes. The image reuses `CubeProxy/Dockerfile`; the chart does not override nginx with a Kubernetes-only configuration.
 
@@ -320,14 +325,13 @@ cubeProxy:
 
 This mode creates a release-scoped Secret with `tls.crt`, `tls.key`, and `ca.crt`. Import `ca.crt` into clients if browser or SDK trust is required. Do not use this mode for production.
 
-`cube-proxy-node` uses `placement.compute`, so proxy Pods run on the same
-dedicated compute node pool as Cube Node Pods. The chart does not create node
-labels.
+`cube-proxy-node` uses `placement.controlPlane`, matching the one-click control-node placement for CubeProxy. The chart does not create node labels.
 
 `cubeProxy.hostNetwork=true` is also the default. This is required for one-click
 parity: CubeProxy must terminate `cube.app` / wildcard traffic on a node-local
-host-network endpoint and directly reach local sandbox bridge IPs such as
-`192.168.0.x:<port>`. The chart patches the image's default nginx listeners to
+host-network endpoint. When the sandbox owner is on a compute node, CubeProxy
+uses Redis routing metadata to connect to the owner `HostIP:hostPort`. The
+chart patches the image's default nginx listeners to
 the configured `cubeProxy.ports.*.containerPort` values, which default to `80`
 and `443`.
 
@@ -335,7 +339,7 @@ The chart does not create a `cube-proxy-node` ClusterIP Service. A normal
 Kubernetes Service load-balances requests across proxy Pods, which does not
 match the one-click model where callers reach an explicit CubeProxy host
 endpoint. For sandbox data-plane traffic, point wildcard DNS at a specific
-CubeProxy node IP or at an external load balancer that preserves the intended
+control-node CubeProxy IP or at an external load balancer that preserves the intended
 CubeProxy topology.
 
 CubeProxy admin health remains loopback-only inside each Pod, matching the image's nginx admin listener. The chart validates it through Pod readiness/liveness probes rather than exposing it through a Service.
@@ -377,58 +381,23 @@ node-local `cube-dns` on the compute node HostIP, and
 `default_dns_servers`.
 
 CubeVS eBPF egress does not traverse host kube-proxy ClusterIP DNAT, so guests
-should not access Kubernetes Service ClusterIPs directly. For Services that
-must be reached by sandbox DNS name, configure a node-local HTTP proxy and
-matching DNS overrides:
+should not rely on Kubernetes Service ClusterIPs as if they were ordinary
+external addresses. The chart no longer renders sandbox service proxy resources
+or DNS overrides for them; expose required in-cluster services through the
+platform networking layer, AgentWay provider configuration, or an
+operator-managed proxy outside this chart.
 
-```yaml
-cubeDns:
-  sandboxGateway:
-    enabled: true
-
-cubeNode:
-  dns:
-    sandbox:
-      useCubeDns: true
-  sandboxServiceProxy:
-    dedicated:
-      enabled: true
-      nodeName: 10.2.36.21
-      answerIPs:
-        - 10.2.36.21
-      dns:
-        enabled: true
-  sandboxServiceProxies:
-    - name: agent-way-model-gateway
-      listenPort: 4000
-      upstreamHost: agent-way-model-gateway.agent-infra.svc.cluster.local
-      upstreamPort: 4000
-      upstreamResolver: 172.19.166.188
-      upstreamHostHeader: agent-way-model-gateway.agent-infra.svc.cluster.local
-      answerIPs:
-        - 10.2.36.21
-      dnsNames:
-        - agent-way-model-gateway.agent-infra
-        - agent-way-model-gateway.agent-infra.svc.cluster.local
-```
-
-With this configuration, `cube-dns` returns the dedicated proxy IP for the
-listed names, and the proxy connects to the Kubernetes Service from the node
-network namespace. Set `upstreamResolver` to the cluster DNS Service IP when
-`dnsNames` includes the same FQDN as `upstreamHost`, otherwise the proxy can
-resolve its own upstream back to the node-local override.
-
-The sandbox network policy must allow both the dedicated proxy IP and the
-dedicated DNS IP used as the guest nameserver.
-
-Set `cubeDns.answerIP` to return a fixed A record. If it is empty in node-local
-mode, `cube-dns` returns the current node HostIP. Optional `cubeDns.mode=service`
-keeps the older ClusterIP DNS model, where callers must explicitly point their
-DNS policy or upstream DNS to the `cube-dns` Service. In service mode, set
-`cubeDns.answerIP` to an explicit CubeProxy entrypoint.
+Set `cubeProxy.advertiseIP` or `cubeDns.answerIP` to return the control-node
+CubeProxy entrypoint. If both are empty in node-local mode, `cube-dns` falls
+back to the current compute HostIP for compatibility with older local-proxy
+topologies; that fallback is not suitable when CubeProxy runs only on control
+nodes. Optional `cubeDns.mode=service` keeps the older ClusterIP DNS model,
+where callers must explicitly point their DNS policy or upstream DNS to the
+`cube-dns` Service. In service mode, set `cubeDns.answerIP` or
+`cubeProxy.advertiseIP` to an explicit CubeProxy entrypoint.
 
 The chart does not silently rewrite Kubernetes nodes' host DNS settings.
-For external clients, browsers, SDKs, or any Pod that is not explicitly using this `dnsConfig`, configure DNS/LB/Ingress outside the chart so `cubeProxy.domain` and wildcard subdomains resolve to an explicit CubeProxy node or external load balancer.
+For external clients, browsers, SDKs, or any Pod that is not explicitly using this `dnsConfig`, configure DNS/LB/Ingress outside the chart so `cubeProxy.domain` and wildcard subdomains resolve to an explicit control-node CubeProxy endpoint or external load balancer.
 
 ## WebUI
 
@@ -483,8 +452,8 @@ Do not rotate the CubeEgress CA casually: templates baked with the old CA and sa
 ## Render and lint
 
 ```bash
-helm lint ./deploy/k8s/chart
-helm template cube ./deploy/k8s/chart -n cube-system > /tmp/cube-rendered.yaml
+helm lint ./deploy/kubernetes/chart
+helm template cube ./deploy/kubernetes/chart -n cube-system > /tmp/cube-rendered.yaml
 ```
 
 ## Verify
@@ -492,6 +461,8 @@ helm template cube ./deploy/k8s/chart -n cube-system > /tmp/cube-rendered.yaml
 ```bash
 kubectl get pods -n cube-system -o wide
 kubectl get ds -n cube-system cube-node
+kubectl get deploy -n cube-system cube-proxy-node
+kubectl get sts -n cube-system cube-mysql cube-redis
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c pvm-host-bootstrap --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cube-node-init --tail=100
 kubectl logs -n cube-system -l app.kubernetes.io/component=cube-node -c cube-node --tail=100

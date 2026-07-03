@@ -3,19 +3,20 @@
 #
 # This script builds role-specific images directly from the CubeSandbox release
 # package (sandbox-package). cube-node intentionally uses
-# deploy/images/cube-node/Dockerfile because it is a Kubernetes delivery image
+# deploy/kubernetes/images/cube-node/Dockerfile because it is a Kubernetes delivery image
 # that bundles node-side runtime components.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 
-VERSION="${VERSION:-v0.4.0}"
+VERSION="${VERSION:-v0.5.0}"
 IMAGE_TAG="${IMAGE_TAG:-${VERSION}}"
-REGISTRY="${REGISTRY:-ccr.ccs.tencentyun.com/pavleli}"
+REGISTRY="${REGISTRY:-docker.io/liv1020}"
 PUSH="${PUSH:-0}"
 NO_CACHE="${NO_CACHE:-0}"
-BUILD_ROOT="${BUILD_ROOT:-${SCRIPT_DIR}/.work}"
+BUILD_ROOT="${BUILD_ROOT:-/tmp/cube-kubernetes-images-${VERSION}}"
+CUBE_NODE_BASE_IMAGE="${CUBE_NODE_BASE_IMAGE:-}"
 
 ONE_CLICK_URL="${ONE_CLICK_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/cube-sandbox-one-click-${VERSION}.tar.gz}"
 PVM_KERNEL_RPM_URL="${PVM_KERNEL_RPM_URL:-https://downloads.sourceforge.net/project/cubesandbox.mirror/${VERSION}/kernel-6.6.69_opencloudos9.cubesandbox.pvm.host_gb85200d80fa2-1.x86_64.rpm}"
@@ -193,9 +194,12 @@ copy_cube_proxy_component_context() {
   local sidecar_out="${ctx}/bin/cube-proxy-sidecar"
 
   [[ -f "${src}/nginx.conf" ]] || fail "missing CubeProxy nginx.conf"
+  [[ -d "${src}/conf/includes" ]] || fail "missing CubeProxy conf/includes"
   [[ -f "${sidecar_src}/go.mod" ]] || fail "missing CubeProxy sidecar source"
 
   cp -a "${src}/lua" "${ctx}/lua"
+  mkdir -p "${ctx}/conf"
+  cp -a "${src}/conf/includes" "${ctx}/conf/includes"
   cp "${src}/nginx.conf" "${ctx}/nginx.conf"
   cp "${src}/rotate_nginx_log.sh" "${ctx}/rotate_nginx_log.sh"
   cp "${src}/root" "${ctx}/root"
@@ -246,6 +250,27 @@ build_component_image() {
   fi
 }
 
+build_cube_api_image() {
+  local dockerfile="${CONTEXT_DIR}/cube-api.Dockerfile"
+
+  # CubeAPI/Dockerfile first compiles a dummy main to cache dependencies. Docker
+  # preserves source mtimes on COPY, so Cargo can incorrectly keep that dummy
+  # binary if the real src/main.rs is older than the cached artifact. Keep the
+  # upstream Dockerfile unchanged and inject one cache-busting cleanup layer for
+  # Kubernetes image builds.
+  awk '
+    {
+      print
+      if ($0 == "COPY src/ src/") {
+        print "RUN rust_target=\"$(cat /etc/rust-target)\" \\"
+        print "    && rm -f \"target/${rust_target}/release/cube-api\" target/${rust_target}/release/deps/cube_api-*"
+      }
+    }
+  ' "${REPO_ROOT}/CubeAPI/Dockerfile" > "${dockerfile}"
+
+  build_component_image cube-api "${dockerfile}" "${REPO_ROOT}/CubeAPI"
+}
+
 build_cube_egress_openresty_base_image() {
   local image="cube-egress/openresty:1.29.2.5-tproxy"
   local docker_args=(
@@ -279,6 +304,28 @@ build_cube_egress_image() {
   fi
 }
 
+build_cube_node_from_base_image() {
+  local ctx
+  local dockerfile
+
+  [[ -n "${CUBE_NODE_BASE_IMAGE}" ]] || fail "CUBE_NODE_BASE_IMAGE is required"
+  ctx="$(prepare_context cube-node)"
+  copy_scripts "${ctx}" cube-node-entrypoint.sh
+  dockerfile="${ctx}/Dockerfile.rebase"
+
+  cat > "${dockerfile}" <<EOF
+FROM ${CUBE_NODE_BASE_IMAGE}
+
+COPY scripts/cube-node-entrypoint.sh /usr/local/bin/cube-node-entrypoint.sh
+
+RUN chmod +x /usr/local/bin/cube-node-entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/cube-node-entrypoint.sh"]
+EOF
+
+  build_component_image cube-node "${dockerfile}" "${ctx}"
+}
+
 copy_cube_egress_net_context() {
   local ctx="$1"
   local init_script="${REPO_ROOT}/CubeEgress/scripts/cube-proxy-iptables-init.sh"
@@ -295,7 +342,7 @@ ctx="$(prepare_context cube-master)"
 copy_cube_master_component_context "${ctx}"
 build_component_image cube-master "${REPO_ROOT}/CubeMaster/docker/Dockerfile" "${ctx}"
 
-build_component_image cube-api "${REPO_ROOT}/CubeAPI/Dockerfile" "${REPO_ROOT}/CubeAPI"
+build_cube_api_image
 
 ctx="$(prepare_context cubemastercli)"
 copy_cubemastercli_context "${ctx}"
@@ -318,16 +365,21 @@ copy_if_exists "${PACKAGE_DIR}/webui" "${ctx}/package/webui"
 [[ -f "${ctx}/package/webui/nginx.conf" ]] || fail "invalid webui package: missing nginx.conf"
 build_image cube-webui "${ctx}"
 
-ctx="$(prepare_context cube-node)"
-copy_scripts "${ctx}" cube-node-entrypoint.sh
-for d in Cubelet network-agent cube-shim cube-kernel-scf cube-image cube-vs cube-snapshot; do
-  copy_if_exists "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"
-  mkdir -p "${ctx}/package/${d}"
-done
-mkdir -p "${ctx}/package/scripts"
-copy_if_exists "${PACKAGE_DIR}/scripts/common" "${ctx}/package/scripts/common"
-mkdir -p "${ctx}/package/scripts/common"
-build_image cube-node "${ctx}"
+if [[ -n "${CUBE_NODE_BASE_IMAGE}" ]]; then
+  log "building cube-node by rebasing ${CUBE_NODE_BASE_IMAGE}"
+  build_cube_node_from_base_image
+else
+  ctx="$(prepare_context cube-node)"
+  copy_scripts "${ctx}" cube-node-entrypoint.sh
+  for d in Cubelet network-agent cube-shim cube-kernel-scf cube-image cube-vs cube-snapshot; do
+    copy_if_exists "${PACKAGE_DIR}/${d}" "${ctx}/package/${d}"
+    mkdir -p "${ctx}/package/${d}"
+  done
+  mkdir -p "${ctx}/package/scripts"
+  copy_if_exists "${PACKAGE_DIR}/scripts/common" "${ctx}/package/scripts/common"
+  mkdir -p "${ctx}/package/scripts/common"
+  build_image cube-node "${ctx}"
+fi
 
 ctx="$(prepare_context cube-node-init)"
 copy_scripts "${ctx}" cube-node-init.sh

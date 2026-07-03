@@ -98,15 +98,16 @@ spec:
 ---
 {{- end }}
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: {{ include "cube.proxyName" . }}
   labels:
     {{- include "cube.labels" . | nindent 4 }}
     app.kubernetes.io/component: cube-proxy-node
 spec:
-  updateStrategy:
-    {{- toYaml .Values.cubeProxy.updateStrategy | nindent 4 }}
+  replicas: {{ .Values.cubeProxy.replicas }}
+  strategy:
+    {{- toYaml .Values.cubeProxy.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "cube.selectorLabels" . | nindent 6 }}
@@ -128,7 +129,7 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- include "cube.computePlacement" . | nindent 6 }}
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
       containers:
         - name: cube-proxy-node
           image: {{ include "cube.image" .Values.images.proxyNode | quote }}
