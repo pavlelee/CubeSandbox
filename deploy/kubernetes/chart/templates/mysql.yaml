@@ -1,0 +1,135 @@
+{{- if eq (include "cube.mysqlBuiltinEnabled" .) "true" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cube.mysqlName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cube.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: mysql
+  template:
+    metadata:
+      labels:
+        {{- include "cube.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: mysql
+    spec:
+      {{- include "cube.controlPlanePlacement" . | nindent 6 }}
+      containers:
+        - name: mysql
+          image: {{ include "cube.image" .Values.mysql.image | quote }}
+          imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
+          env:
+            {{- include "cube.timezoneEnv" . | nindent 12 }}
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: mysql-root-password
+            - name: MYSQL_DATABASE
+              value: {{ .Values.mysql.database | quote }}
+            - name: MYSQL_USER
+              value: {{ .Values.mysql.user | quote }}
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "cube.secretName" . }}
+                  key: mysql-password
+          args:
+            - --default-authentication-plugin=mysql_native_password
+            - --skip-name-resolve
+          ports:
+            - name: mysql
+              containerPort: 3306
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 10
+            periodSeconds: 3
+            failureThreshold: 40
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -ec
+                - mysqladmin ping -h 127.0.0.1 -u"${MYSQL_USER}" -p"${MYSQL_PASSWORD}" --silent
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- if .Values.mysql.persistence.enabled }}
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+          {{- end }}
+          {{- with .Values.mysql.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.mysql.persistence.enabled }}
+      volumes:
+        - name: mysql-data
+          {{- if .Values.mysql.persistence.hostPath }}
+          hostPath:
+            path: {{ .Values.mysql.persistence.hostPath | quote }}
+            type: DirectoryOrCreate
+          {{- else if .Values.mysql.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.mysqlPVCName" . }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "cube.mysqlPVCName" . }}
+          {{- end }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cube.mysqlName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cube.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+  ports:
+    - name: mysql
+      port: {{ .Values.mysql.port }}
+      targetPort: mysql
+{{- if and .Values.mysql.persistence.enabled (not .Values.mysql.persistence.hostPath) (not .Values.mysql.persistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "cube.mysqlPVCName" . }}
+  labels:
+    {{- include "cube.labels" . | nindent 4 }}
+    app.kubernetes.io/component: mysql
+spec:
+  accessModes:
+    {{- toYaml .Values.mysql.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.mysql.persistence.size | quote }}
+  {{- if .Values.mysql.persistence.storageClassName }}
+  storageClassName: {{ .Values.mysql.persistence.storageClassName | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
